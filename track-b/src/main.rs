@@ -48,6 +48,18 @@ fn word(d: &[u8], p: usize) -> u64 {
 }
 
 const ONES: u64 = 0x0101_0101_0101_0101;
+
+// Offset of the first byte c in d[p..], eight bytes at a time (exact zero-byte test).
+fn find(d: &[u8], mut p: usize, c: u8) -> usize {
+    loop {
+        let x = word(d, p) ^ c as u64 * ONES;
+        let z = !(((x & !HI) + !HI) | x) & HI;
+        if z != 0 {
+            return p + z.trailing_zeros() as usize / 8;
+        }
+        p += 8;
+    }
+}
 const HI: u64 = 0x8080_8080_8080_8080;
 
 // High bit of each byte of w in [a, b]; bytes of 0x80 and above never match.
@@ -313,9 +325,9 @@ fn main() {
         let (mut seq, mut hits, mut found, mut lastm) = (vec![], vec![], vec![], vec![NONE; phr.len()]);
         let mut p = bs[t];
         while p < bs[t + 1] {
-            let tab = p + d[p..].iter().position(|&c| c == b'\t').unwrap();
+            let tab = find(d, p, b'\t');
             let id = id_at(p) as u32;
-            let end = tab + d[tab..].iter().position(|&c| c == b'\n').unwrap();
+            let end = find(d, tab, b'\n');
             let i = id as usize - first[t];
             tokens(dict, &d[tab + 1..end], |w| {
                 let u = w as usize;

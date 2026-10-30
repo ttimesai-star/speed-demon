@@ -20,3 +20,9 @@ the reference run locally on the same generated data), and the spec's worked exa
 Queries parsed 18 ms, corpus pass ~255 ms (with the Windows file read), list concatenation ~55 ms, answers
 ~265 ms, of which BOOL ~100 ms and PHRASE ~160 ms (measured with BOOL-only and PHRASE-only query files on the
 same corpus). The PHRASE share was the re-tokenization of candidates, more bytes than the corpus itself.
+
+## Tried and reverted
+
+- **Bloom filter in front of the dictionary** (128 KB, one bit per term hash; 9e6ad48): PC −20 % (429 → 342 ms),
+  Linux A/B +2 % (2602.7 vs 2654.6 ms), board 0.6556 s vs 0.6525 s with S +11 (run-9aa73a6479ad, 53.82 points).
+  Reverted: the cache effect does not carry from one machine to another.
