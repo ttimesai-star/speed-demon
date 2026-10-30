@@ -64,6 +64,7 @@ fn edges(d: &[u8], a: usize, b: usize, mut f: impl FnMut(usize, usize, u32)) {
 }
 
 // One half of a bidirectional Dijkstra search: u32 distances, touched nodes, heap of dist << 32 | node.
+// d holds !dist, so the zeroed (calloc'd, untouched) array means "not reached" and costs no memory.
 struct Side {
     d: Vec<u32>,
     seen: Vec<u32>,
@@ -72,13 +73,13 @@ struct Side {
 
 impl Side {
     fn new(n: usize) -> Side {
-        Side { d: vec![u32::MAX; n], seen: vec![], h: BinaryHeap::new() }
+        Side { d: vec![0; n], seen: vec![], h: BinaryHeap::new() }
     }
     fn top(&self) -> u64 {
         self.h.peek().map_or(u64::MAX, |r| r.0 >> 32)
     }
     fn start(&mut self, s: usize) {
-        (self.d[s] = 0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
+        (self.d[s] = !0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
     }
     // Settles the nearest node; `best` takes its sum with the other half's label (checking at settle time
     // is enough for the stop rule top + top >= best). False if a sum does
@@ -86,29 +87,29 @@ impl Side {
     fn step(&mut self, off: &[u32], adj: &[(u32, u32)], other: &[u32], best: &mut u64) -> bool {
         let Reverse(e) = self.h.pop().unwrap();
         let (du, u) = (e >> 32, e as u32 as usize);
-        if du > self.d[u] as u64 {
+        if du > !self.d[u] as u64 {
             return true;
         }
-        if other[u] != u32::MAX {
-            *best = (*best).min(du + other[u] as u64);
+        if other[u] != 0 {
+            *best = (*best).min(du + !other[u] as u64);
         }
         for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
             let (v, nd) = (v as usize, du + w as u64);
             if nd >= u32::MAX as u64 {
                 return false;
             }
-            if nd < self.d[v] as u64 {
-                if self.d[v] == u32::MAX {
+            if nd < !self.d[v] as u64 {
+                if self.d[v] == 0 {
                     self.seen.push(v as u32);
                 }
-                (self.d[v] = nd as u32, self.h.push(Reverse(nd << 32 | v as u64)));
+                (self.d[v] = !(nd as u32), self.h.push(Reverse(nd << 32 | v as u64)));
             }
         }
         true
     }
     fn reset(&mut self) {
         for &v in &self.seen {
-            self.d[v as usize] = u32::MAX;
+            self.d[v as usize] = 0;
         }
         (self.seen.clear(), self.h.clear());
     }
@@ -276,17 +277,22 @@ fn main() {
         qs.push((id[num(&q, &mut p) as usize] as usize, id[num(&q, &mut p) as usize] as usize));
     }
     drop(id);
+    // Queries sorted by source and handed out in 4 blocks per thread: a thread's searches stay in a few
+    // regions of the BFS order, so only those pages of its distance arrays are ever touched.
+    let mut order: Vec<usize> = (0..qs.len()).collect();
+    order.sort_by_key(|&i| qs[i].0);
     let ans: Vec<AtomicU64> = qs.iter().map(|_| AtomicU64::new(0)).collect();
     let next = AtomicUsize::new(0);
+    let (order, nb) = (&order, 4 * nt);
     let (off, adj, roff, radj) = (&off, &adj, &roff, &radj);
     thread::scope(|sc| {
         for _ in 0..nt {
             let (qs, ans, next) = (&qs, &ans, &next);
             sc.spawn(move || {
                 let (mut f, mut b) = (Side::new(n), Side::new(n));
-                loop {
-                    let i = next.fetch_add(1, Relaxed);
-                    let Some(&(s, t)) = qs.get(i) else { break };
+                let blocks = (0..).map(|_| next.fetch_add(1, Relaxed)).take_while(|&k| k < nb);
+                for i in blocks.flat_map(|k| order[k * order.len() / nb..(k + 1) * order.len() / nb].iter().copied()) {
+                    let (s, t) = qs[i];
                     let mut best = u64::MAX; // unreachable
                     if s == t {
                         best = 0;
