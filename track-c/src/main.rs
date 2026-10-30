@@ -94,13 +94,18 @@ fn field(d: &[u8], p: &mut usize) -> (usize, usize, usize) {
 
 // Dense id of the raw name d[s..s+n], shared by all threads. A new name is copied to the arena first,
 // then published by CAS as arena offset << 36 | length << 20 | id (bit 63 set, 0 = empty slot).
-fn name_id(tab: &[AtomicU64], arena: &[AtomicU64], top: &AtomicU64, d: &[u8], s: usize, n: usize) -> u64 {
+// Hash of the raw name d[s..s+n] and its first slot in the name table.
+fn name_slot(d: &[u8], s: usize, n: usize) -> usize {
     let mut h = n as u64;
     for k in (0..n).step_by(8) {
         let w = word(d, s + k) & u64::MAX >> 8 * (8 - (n - k).min(8)) as u32 % 64;
         h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
-    let mut i = (h >> 40) as usize & (SLOTS - 1);
+    (h >> 40) as usize & (SLOTS - 1)
+}
+
+// Dense id of the raw name d[s..s+n] whose first slot is i (see name_slot).
+fn name_id(tab: &[AtomicU64], arena: &[AtomicU64], top: &AtomicU64, d: &[u8], s: usize, n: usize, mut i: usize) -> u64 {
     loop {
         let mut v = tab[i].load(Acquire);
         if v == 0 {
@@ -192,6 +197,14 @@ fn main() {
             .map(|k| {
                 sc.spawn(move || {
                     let mut agg = vec![ZERO; nc + 1];
+                    let mut pend = None;
+                    let mark = |(ns, nn, i, g): (usize, usize, usize, usize)| {
+                        let nid = if nn == 0 { 0 } else { name_id(tab, arena, top, d, ns, nn, i) } as usize;
+                        let w = &seen[g * IDS / 64 + nid / 64];
+                        if w.load(Relaxed) & 1 << (nid % 64) == 0 {
+                            w.fetch_or(1 << (nid % 64), Relaxed);
+                        }
+                    };
                     let mut p = bs[k];
                     while p < bs[k + 1] {
                         if d[p..].starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -215,12 +228,15 @@ fn main() {
                         (a.count += 1, a.ids += id, a.sum += amt);
                         (a.min = a.min.min(amt), a.max = a.max.max(amt));
                         (a.name_bytes += (nn - np) as i64, a.note_bytes += (tn - tp) as i64);
-                        let nid = if nn == 0 { 0 } else { name_id(tab, arena, top, d, ns, nn) } as usize;
-                        let w = &seen[g * IDS / 64 + nid / 64];
-                        if w.load(Relaxed) & 1 << (nid % 64) == 0 {
-                            w.fetch_or(1 << (nid % 64), Relaxed);
+                        // A two-stage pipeline: this record's slot is prefetched, the previous record's name is
+                        // looked up (its slot is in cache by now) and marked for its country.
+                        let i = name_slot(d, ns, nn);
+                        unsafe { std::arch::x86_64::_mm_prefetch::<3>(tab.as_ptr().add(i) as *const i8) };
+                        if let Some(x) = pend.replace((ns, nn, i, g)) {
+                            mark(x);
                         }
                     }
+                    pend.map(mark);
                     agg
                 })
             })
