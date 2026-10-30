@@ -134,6 +134,7 @@ fn wide(off: &[u32], adj: &[(u32, u32)], s: usize, t: usize) -> u64 {
 }
 
 fn main() {
+    let t0 = std::time::Instant::now();
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     let d = load(&format!("{din}/graph.txt"));
@@ -162,6 +163,7 @@ fn main() {
             });
         }
     });
+    eprintln!("pass1 {:?}", t0.elapsed());
     let mut off: Vec<u32> = deg.into_iter().map(|x| x.into_inner()).collect();
     for i in 0..n {
         off[i + 1] += off[i];
@@ -181,6 +183,7 @@ fn main() {
         }
     });
     drop(cur);
+    eprintln!("csr {:?}", t0.elapsed());
     // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
     // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
     let own: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(u32::MAX)).collect();
@@ -226,6 +229,7 @@ fn main() {
     for (i, &o) in ord.iter().enumerate() {
         id[o as usize] = i as u32;
     }
+    eprintln!("bfs {:?}", t0.elapsed());
     let mut off2 = vec![0u32; n + 1];
     for i in 0..n {
         let o = ord[i] as usize;
@@ -246,6 +250,7 @@ fn main() {
             });
         }
     });
+    eprintln!("renum {:?}", t0.elapsed());
     drop((off, adj));
     let (off, adj) = (off2, adj2);
     // Reverse CSR for the backward half of the search.
@@ -270,6 +275,7 @@ fn main() {
         }
     });
     drop((rcur, ord, ind));
+    eprintln!("rev {:?}", t0.elapsed());
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
     while p < q.len() {
@@ -312,6 +318,7 @@ fn main() {
             });
         }
     });
+    eprintln!("queries {:?}", t0.elapsed());
     let mut out = Vec::with_capacity(qs.len() * 12);
     for a in &ans {
         match a.load(Relaxed) {
