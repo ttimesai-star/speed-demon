@@ -6,7 +6,9 @@ Every step from the reference to your final version, each with the live-board ru
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 72.69 | 893 | 0 |
 | 1 | Rust: mmap, two-pass parallel CSR, per-query Dijkstra (binary heap, early stop) on all threads, `-1` at once for targets with no in-edges and sources with no out-edges (commit 4296630) | run-fb3879b67c30 | 0.909 | 234.8 | 49.16 |
-| 2 | Parallel BFS renumbering (one BFS per thread, CAS claims), CSR rebuilt in the new order; `u32` distances and one-word heap entries, `u64` hash-map fallback for sums ≥ 2^32 − 1. PC (8 threads): queries 345 → 130 ms, whole run ~400 → ~220 ms | | | | |
+| 2 | Parallel BFS renumbering (one BFS per thread, CAS claims), CSR rebuilt in the new order; `u32` distances and one-word heap entries, `u64` hash-map fallback for sums ≥ 2^32 − 1. PC (8 threads): queries 345 → 130 ms, whole run ~400 → ~220 ms (commit 2610429) | run-98ac9ddadc83 | 0.411 | 210.7 | 56.62 |
+| 3 | SWAR number parse (A/B −1.7 %), the first CSR freed before the queries; bidirectional Dijkstra on a reverse CSR, both halves `u32` (Linux A/B 2011 → 1227 ms, −39 %) (commit bd27f6e) | run-83b2399db32d | 0.262 | 289.2 | 59.28 |
+| 4 | CSR without atomics: each thread cuts its edges by tail range, then thread k counts, sums and fills range k (the `fetch_add` on a random cursor was 28 % of all samples in `perf`: locked RMWs serialise the cache misses). Same for the reverse CSR. Linux A/B 1368 → 1095 ms (−20 %). Meeting check at settle time instead of on every relaxed edge (A/B 955.6 → 937.7 ms, −1.9 %); the id map freed after reading the queries | | | | |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 
@@ -17,7 +19,7 @@ Every step from the reference to your final version, each with the live-board ru
 | + bidirectional Dijkstra (reverse CSR) | 55 ms | 63 ms + 11 ms | 230–265 ms | ~400 ms — not taken |
 | + parallel BFS (step 2 without u32) | 55 ms | 35 ms | 200 ms | ~300 ms |
 | + `u32` distances (step 2) | 47 ms | 28 ms | 130 ms | ~210–250 ms |
-| + radix heap | 47 ms | 28 ms | 140 ms | 267 vs 255 ms median of 7 — noise, not taken |
+| + radix heap | 47 ms | 28 ms | 140 ms | 267 vs 255 ms median of 7 — noise, not taken; Linux A/B on top of the SWAR parse: 2090.7 vs 1972.4 ms, +6 % — not taken |
 
 The board runs ~2.2x slower than the PC on step 1 (0.909 s vs ~0.4 s): the board's i5-13500 has 24 MB of L3
 against the PC's 96 MB, and Dijkstra on randomly labelled nodes is bound by cache misses. That is why
@@ -25,3 +27,9 @@ locality (step 2) came first.
 
 Correctness, every step: seed 1 sample and full (published hashes), seed 2 sample and full and seed 1 tiny
 (reference run locally on the same data), the spec's worked example.
+
+## Linux phase profile (step 3, 2 vCPU runner, `perf record`)
+
+Parse + degree count 177 ms, edge placement 420 ms, BFS 115 ms, renumbering 100 ms, reverse CSR 65 ms,
+queries 480 ms. `perf`: `Side::step` 33 %, the edge-placement closure 29 % (all of it on the
+`cur[u].fetch_add` line), parse 12 %. Step 4 removes every atomic RMW from the CSR builds.
