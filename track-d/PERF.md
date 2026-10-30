@@ -12,7 +12,9 @@ Every step from the reference to your final version, each with the live-board ru
 | 5 | M: per-search open-addressing tables (2^18 slots of `(node + 1) << 32 \| dist` per half, reset by the list of touched slots, a search that would fill half the table goes to the `u64` path) instead of two dense `u32` arrays per thread; reverse CSR by two scans of the forward edges per head range instead of a 60 MB edge copy. Harness with 12 threads forced: M 274 → 158 MB; Linux A/B 901.9 → 941.7 ms (+4.4 %). By the K formula: −0.5 points for T, +2.4 for M (commit 1577ee3) | run-a741c2a56a3e | 0.514 | 157.7 | 54.03 — **reverted**: the board ran it 2.2x slower than step 4, the CI runner only 4 % slower. The code is back to step 4 |
 | 5b | Distance arrays zeroed by calloc with `!dist` stored (no fill pass), and queries in source-sorted blocks so that a thread's searches stay in a few regions of the id order. Harness, 12 threads: M 274 → 262 MB only (the BFS order is not spatial: sorted sources sit on the same BFS rings at all angles). Blocks dropped; the zeroed arrays alone: Linux A/B 1024.5 → 1005.4 ms (−1.9 %), board 0.2485 s, no better than step 4 (commit f241505, run-1380f6286219, 60.03 points); reverted | run-1380f6286219 | 0.2485 | 272.1 | 60.03 |
 | 6 | Serial work removed: the sweep for nodes no BFS reached did a CAS on every one of the 1.74 M nodes in one thread; now a plain load first. New ids and new-order degrees in parallel by position. PC 148 → 125 ms (−16 %); Linux A/B (2 vCPU, where serial work weighs less) 823.9 → 810.1 ms (commit a7178e6, pushed as 9e6ad48) | run-fb13141bf3c0 | 0.214 | 296.4 | 61.21 |
-| 7 | Step 6 kept the old offsets, the BFS order and the degrees alive into the query phase (+21 MB): the reference names shadowed the vectors, so `drop` freed the references. Fixed (harness, 12 threads: 282 MB) | | | | |
+| 7 | Step 6 kept the old offsets, the BFS order and the degrees alive into the query phase (+21 MB): the reference names shadowed the vectors, so `drop` freed the references. Fixed (harness, 12 threads: 282 MB) (commit e80f39d, pushed as cad0914) | run-809d9adc5d18 | 0.2135 | 282.4 | 61.45 |
+| — | PGO (training on the seed-2 sample): board 0.2125 s, neutral; reverted | run-550d330bd124 | 0.2125 | 281.9 | 61.50 |
+| 8 | No fresh pages for the reverse CSR: its buckets reuse the forward pass's buckets and its edge array reuses the old (pre-renumbering) edge array, written slot by slot without a zero fill. PC 124 → 121 ms (commit da82400, pushed as cb2f844) | run-44ed9514eec5 | 0.2047 | 282.7 | 61.82 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 
@@ -23,6 +25,7 @@ Every step from the reference to your final version, each with the live-board ru
 | + bidirectional Dijkstra (reverse CSR) | 55 ms | 63 ms + 11 ms | 230–265 ms | ~400 ms — not taken |
 | + parallel BFS (step 2 without u32) | 55 ms | 35 ms | 200 ms | ~300 ms |
 | + `u32` distances (step 2) | 47 ms | 28 ms | 130 ms | ~210–250 ms |
+| + 4-ary heap (on step 7) | | | | 127.6 vs 124.7 ms, +2 % — not taken |
 | + radix heap | 47 ms | 28 ms | 140 ms | 267 vs 255 ms median of 7 — noise, not taken; Linux A/B on top of the SWAR parse: 2090.7 vs 1972.4 ms, +6 % — not taken |
 
 The board runs ~2.2x slower than the PC on step 1 (0.909 s vs ~0.4 s): the board's i5-13500 has 24 MB of L3
