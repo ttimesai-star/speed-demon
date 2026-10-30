@@ -64,7 +64,7 @@ fn edges(d: &[u8], a: usize, b: usize, mut f: impl FnMut(usize, usize, u32)) {
 }
 
 // One half of a bidirectional Dijkstra search: u32 distances, touched nodes, heap of dist << 32 | node.
-// d holds !dist, so the zeroed (calloc'd, untouched) array means "not reached" and costs no memory.
+// d holds !dist, so a zeroed (calloc'd) array means "not reached" and needs no fill pass.
 struct Side {
     d: Vec<u32>,
     seen: Vec<u32>,
@@ -277,22 +277,17 @@ fn main() {
         qs.push((id[num(&q, &mut p) as usize] as usize, id[num(&q, &mut p) as usize] as usize));
     }
     drop(id);
-    // Queries sorted by source and handed out in 4 blocks per thread: a thread's searches stay in a few
-    // regions of the BFS order, so only those pages of its distance arrays are ever touched.
-    let mut order: Vec<usize> = (0..qs.len()).collect();
-    order.sort_by_key(|&i| qs[i].0);
     let ans: Vec<AtomicU64> = qs.iter().map(|_| AtomicU64::new(0)).collect();
     let next = AtomicUsize::new(0);
-    let (order, nb) = (&order, 4 * nt);
     let (off, adj, roff, radj) = (&off, &adj, &roff, &radj);
     thread::scope(|sc| {
         for _ in 0..nt {
             let (qs, ans, next) = (&qs, &ans, &next);
             sc.spawn(move || {
                 let (mut f, mut b) = (Side::new(n), Side::new(n));
-                let blocks = (0..).map(|_| next.fetch_add(1, Relaxed)).take_while(|&k| k < nb);
-                for i in blocks.flat_map(|k| order[k * order.len() / nb..(k + 1) * order.len() / nb].iter().copied()) {
-                    let (s, t) = qs[i];
+                loop {
+                    let i = next.fetch_add(1, Relaxed);
+                    let Some(&(s, t)) = qs.get(i) else { break };
                     let mut best = u64::MAX; // unreachable
                     if s == t {
                         best = 0;
