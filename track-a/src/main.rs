@@ -19,7 +19,7 @@ fn load(path: &str) -> &'static [u8] {
     if n == 0 {
         return &[];
     }
-    unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), n, 1, 2, f.as_raw_fd(), 0), n) }
+    unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), n, 1, 2 | 0x8000, f.as_raw_fd(), 0), n) }
 }
 
 #[cfg(not(unix))]
