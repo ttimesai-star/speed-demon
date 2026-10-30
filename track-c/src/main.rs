@@ -57,6 +57,14 @@ fn word(d: &[u8], p: usize) -> u64 {
 
 // Offset of the first byte c in d[p..], eight bytes at a time (exact zero-byte test).
 fn find(d: &[u8], mut p: usize, c: u8) -> usize {
+    use std::arch::x86_64::*; // 32 bytes at a time while they fit (x86-64-v3 has AVX2), then 8
+    while p + 32 <= d.len() {
+        let v = unsafe { _mm256_cmpeq_epi8(_mm256_loadu_si256(d.as_ptr().add(p) as *const _), _mm256_set1_epi8(c as i8)) };
+        match unsafe { _mm256_movemask_epi8(v) } as u32 {
+            0 => p += 32,
+            m => return p + m.trailing_zeros() as usize,
+        }
+    }
     loop {
         let x = word(d, p) ^ c as u64 * 0x0101_0101_0101_0101;
         let z = !(((x & 0x7F7F_7F7F_7F7F_7F7F) + 0x7F7F_7F7F_7F7F_7F7F) | x) & 0x8080_8080_8080_8080;
