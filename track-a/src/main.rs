@@ -82,8 +82,9 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
         .collect();
     let mut i = a;
     while i < b {
-        let num = |k: usize| (d[i + k] - b'0') as usize * 10 + (d[i + k + 1] - b'0') as usize;
-        let hour = (num(8) + 31 * (d[i + 6] - b'0') as usize) * 24 + num(11) - 738;
+        let t = word(d, i + 5); // "MM-DDTHH" without the first month digit
+        let dg = |k: u32| (t >> (8 * k) & 15) as usize;
+        let hour = (dg(3) * 10 + dg(4) + 31 * dg(1)) * 24 + dg(6) * 10 + dg(7) - 738;
         let m = (d[i + 28] as usize * 7 + d[i + 29] as usize) >> 2 & 7;
         let s = i + 29 + [6, 3, 0, 0, 5, 3, 7, 4][m]; // method length from its first two bytes
         let (mut p, mut h) = (s, 0u64);
