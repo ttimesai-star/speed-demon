@@ -337,7 +337,9 @@ fn main() {
     let parts = par(nt, |t| {
         let range = first[t + 1] - first[t];
         let (mut cnt, mut last, mut bit) = (vec![0u32; nterms], vec![NONE; nterms], vec![NONE; nterms]);
-        let (mut stream, mut ends, mut tb) = (vec![], vec![], vec![]);
+        // Reserved for the worst case (a token takes two bytes), so the stream never moves; untouched reserve
+        // costs nothing.
+        let (mut stream, mut ends, mut tb) = (Vec::with_capacity((bs[t + 1] - bs[t]) / 2 + 1), vec![], vec![]);
         let (mut seq, mut hits, mut found, mut lastm) = (vec![], vec![], vec![], vec![NONE; phr.len()]);
         let mut p = bs[t];
         while p < bs[t + 1] {
