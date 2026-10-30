@@ -189,8 +189,15 @@ fn main() {
                         let e = errs[s] as u64;
                         buf.extend_from_slice(label.as_bytes());
                         buf.extend_from_slice(ep(s));
-                        let ppm = e * 1_000_000 / n as u64;
-                        writeln!(buf, " {n} {} {} {} {e} {ppm}", v[r[0]], v[r[1]], v[r[2]]).unwrap();
+                        for x in [n as u64, v[r[0]] as u64, v[r[1]] as u64, v[r[2]] as u64, e, e * 1_000_000 / n as u64] {
+                            let (mut t, mut i, mut x) = ([b\x27 \x27; 21], 21, x);
+                            while i == 21 || x > 0 {
+                                (i, t[i - 1], x) = (i - 1, b\x270\x27 + (x % 10) as u8, x / 10);
+                            }
+                            buf.extend_from_slice(&t[i - 1..]);
+                        }
+                        buf.push(b\x27
+\x27);
                     }
                     while done.load(Acquire) != h {
                         thread::yield_now();
