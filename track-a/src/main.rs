@@ -146,11 +146,16 @@ fn main() {
             sc.spawn(|| {
                 let (mut cnt, mut errs, mut cur) = (vec![0u32; SLOTS + 1], vec![0u32; SLOTS], vec![0u32; SLOTS]);
                 let (mut lat, mut buf) = (Vec::new(), Vec::new());
+                let mut tm = [std::time::Duration::ZERO; 6];
+                let mut ck = std::time::Instant::now();
+                let mut lap = |k: usize, tm: &mut [std::time::Duration; 6]| { let n = std::time::Instant::now(); tm[k] += n - ck; ck = n; };
                 loop {
                     let h = next.fetch_add(1, Relaxed);
                     if h >= HOURS {
+                        eprintln!("worker count {:?} scatter {:?} drop {:?} select+fmt {:?} wait {:?} write {:?}", tm[0], tm[1], tm[2], tm[3], tm[4], tm[5]);
                         break;
                     }
+                    lap(5, &mut tm);
                     let recs = std::mem::take(&mut *hours[h].lock().unwrap());
                     (cnt.fill(0), errs.fill(0), buf.clear());
                     for &m in recs.iter().flat_map(|r| &r.1) {
@@ -160,6 +165,7 @@ fn main() {
                     for s in 0..SLOTS {
                         cnt[s + 1] += cnt[s];
                     }
+                    lap(0, &mut tm);
                     cur.copy_from_slice(&cnt[..SLOTS]);
                     lat.resize(cnt[SLOTS] as usize, 0);
                     for r in &recs {
@@ -168,7 +174,9 @@ fn main() {
                             cur[(m & 4095) as usize] += 1;
                         }
                     }
+                    lap(1, &mut tm);
                     drop(recs);
+                    lap(2, &mut tm);
                     let ah = 30 * 24 + 18 + h; // hours since 2026-10-00T00
                     let (day, mon) = if ah / 24 > 31 { (ah / 24 - 31, 11) } else { (ah / 24, 10) };
                     let label = format!("2026-{mon}-{day:02}T{:02}:00:00Z ", ah % 24);
@@ -192,9 +200,11 @@ fn main() {
                         let ppm = e * 1_000_000 / n as u64;
                         writeln!(buf, " {n} {} {} {} {e} {ppm}", v[r[0]], v[r[1]], v[r[2]]).unwrap();
                     }
+                    lap(3, &mut tm);
                     while done.load(Acquire) != h {
                         thread::yield_now();
                     }
+                    lap(4, &mut tm);
                     (&f).write_all(&buf).unwrap();
                     done.store(h + 1, Release);
                 }
