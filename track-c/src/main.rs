@@ -240,7 +240,8 @@ fn main() {
         if a.count == 0 {
             continue;
         }
-        let names: u32 = seen[g * IDS / 64..(g + 1) * IDS / 64].iter().map(|w| w.load(Relaxed).count_ones()).sum();
+        let used = (top.load(Relaxed) & 0xFFFFF) as usize / 64 + 1; // words that can hold a set bit
+        let names: u32 = seen[g * IDS / 64..][..used].iter().map(|w| w.load(Relaxed).count_ones()).sum();
         out.extend_from_slice(if g < nc { &codes[g][..] } else { b"_UNMATCHED" });
         write!(out, " {} {}", a.count, a.ids).unwrap();
         for c in [a.sum, a.min, a.max] {
