@@ -185,7 +185,7 @@ fn not(a: &[u32], b: &[u32]) -> Vec<u32> {
 
 enum Query {
     Bool(Vec<(u8, u32)>), // (operator byte: b'A', b'O', b'N', or 0 for the first term; term id)
-    Phrase(Vec<u32>),
+    Phrase(usize), // index into the phrase list
 }
 
 fn main() {
@@ -198,7 +198,7 @@ fn main() {
     let mut id_of = |o: usize, n: usize| -> u32 {
         *ids.entry(&q[o..o + n]).or_insert_with(|| (terms.push((o, n)), terms.len() as u32 - 1).1)
     };
-    let mut qs = vec![];
+    let (mut qs, mut phr) = (vec![], vec![]);
     for line in q.split(|&c| c == b'\n').filter(|l| !l.is_empty()) {
         let o = line.as_ptr() as usize - q.as_ptr() as usize;
         let mut words = vec![];
@@ -216,24 +216,20 @@ fn main() {
         } else {
             let last = words.len() - 1;
             (words[1] = (words[1].0 + 1, words[1].1 - 1), words[last].1 -= 1); // the quotes
-            qs.push(Query::Phrase(words[1..].iter().map(|&(o, n)| id_of(o, n)).collect()));
+            phr.push(words[1..].iter().map(|&(o, n)| id_of(o, n)).collect::<Vec<u32>>());
+            qs.push(Query::Phrase(phr.len() - 1));
         }
     }
     let nterms = terms.len();
     let dict = Dict::new(&q, terms);
-    // A term that a phrase repeats k times in a row: each document's longest run of it is recorded.
-    let mut rep = vec![NONE; nterms]; // index into the run lists
-    let mut nrep = 0;
-    for x in &qs {
-        if let Query::Phrase(v) = x {
-            for k in 1..v.len() {
-                if v[k] == v[k - 1] && rep[v[k] as usize] == NONE {
-                    (rep[v[k] as usize] = nrep, nrep += 1);
-                }
-            }
-        }
+    // Each phrase is checked in the corpus pass at the occurrences of one trigger term, its longest term
+    // (long words are the rare ones; any choice is correct, a rare one is cheaper).
+    let mut trig: Vec<Vec<(u32, u32)>> = vec![vec![]; nterms]; // term -> (phrase, offset in the phrase)
+    for (k, v) in phr.iter().enumerate() {
+        let j = (0..v.len()).max_by_key(|&j| (dict.terms[v[j] as usize].1, usize::MAX - j)).unwrap();
+        trig[v[j] as usize].push((k as u32, j as u32));
     }
-    // Corpus: one chunk per thread at line starts; per thread a posting list per term.
+    // Corpus: one chunk per thread at line starts; per thread a posting list per term and phrase matches.
     let d = load(&format!("{din}/docs.txt"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
     let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
@@ -243,55 +239,54 @@ fn main() {
         }
     }
     bs.push(d.len());
-    let (dict, rep, bs) = (&dict, &rep, &bs);
+    let (dict, trig, phr, bs) = (&dict, &trig, &phr, &bs);
     let parts = par(nt, |t| {
         let (mut lists, mut last) = (vec![Vec::<u32>::new(); nterms], vec![NONE; nterms]);
-        let (mut runs, mut docs) = (vec![Vec::<(u32, u32)>::new(); nrep as usize], vec![]);
+        let (mut seq, mut hits, mut found, mut lastm) = (vec![], vec![], vec![], vec![NONE; phr.len()]);
         let mut p = bs[t];
         while p < bs[t + 1] {
             let tab = p + d[p..].iter().position(|&c| c == b'\t').unwrap();
             let id = d[p..tab].iter().fold(0u32, |x, &c| x * 10 + (c - b'0') as u32);
             let end = tab + d[tab..].iter().position(|&c| c == b'\n').unwrap();
-            docs.push((tab as u32 + 1, end as u32));
-            let (mut prev, mut run) = (NONE, 0);
             tokens(dict, &d[tab + 1..end], |w| {
-                run = if w == prev { run + 1 } else { 1 };
-                prev = w;
-                if w == NONE {
-                    return;
-                }
-                if last[w as usize] != id {
-                    (last[w as usize] = id, lists[w as usize].push(id));
-                }
-                let r = rep[w as usize];
-                if r != NONE && run >= 2 {
-                    let l = &mut runs[r as usize];
-                    match l.last_mut() {
-                        Some(e) if e.0 == id => e.1 = e.1.max(run),
-                        _ => l.push((id, run)),
+                if w != NONE {
+                    if last[w as usize] != id {
+                        (last[w as usize] = id, lists[w as usize].push(id));
+                    }
+                    if !trig[w as usize].is_empty() {
+                        hits.push((seq.len(), w));
                     }
                 }
+                seq.push(w);
             });
+            for &(at, w) in &hits {
+                for &(k, j) in &trig[w as usize] {
+                    let v = &phr[k as usize];
+                    let s = at.wrapping_sub(j as usize);
+                    if s <= at && s + v.len() <= seq.len() && seq[s..s + v.len()] == v[..] && lastm[k as usize] != id {
+                        (lastm[k as usize] = id, found.push((k, id)));
+                    }
+                }
+            }
+            (seq.clear(), hits.clear());
             p = end + 1;
         }
-        (lists, runs, docs)
+        (lists, found)
     });
     let mut lists: Vec<Vec<u32>> = vec![vec![]; nterms];
-    let mut runs: Vec<Vec<(u32, u32)>> = vec![vec![]; nrep as usize];
-    let mut docs = vec![];
-    for (l, r, dd) in parts {
+    let mut pres: Vec<Vec<u32>> = vec![vec![]; phr.len()];
+    for (l, f) in parts {
         for (a, b) in lists.iter_mut().zip(l) {
             if a.is_empty() { *a = b } else { a.extend_from_slice(&b) }
         }
-        for (a, b) in runs.iter_mut().zip(r) {
-            a.extend_from_slice(&b);
+        for (k, id) in f {
+            pres[k as usize].push(id); // threads in order, documents in order: sorted
         }
-        docs.extend(dd);
     }
     // Queries on all threads, answers by index.
     let ans: Vec<OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| OnceLock::new()).collect();
     let next = AtomicUsize::new(0);
-    let (lists, runs, docs, qs, ans, next) = (&lists, &runs, &docs, &qs, &ans, &next);
+    let (lists, pres, qs, ans, next) = (&lists, &pres, &qs, &ans, &next);
     par(nt, |_| loop {
         let i = next.fetch_add(1, Relaxed);
         let Some(x) = qs.get(i) else { break };
@@ -308,37 +303,7 @@ fn main() {
                 }
                 r
             }
-            Query::Phrase(v) => {
-                // Candidates: every term's list, and the run list of each term repeated k times in a row.
-                let mut sets: Vec<&[u32]> = v.iter().map(|&w| &lists[w as usize][..]).collect();
-                sets.sort_by_key(|s| s.len());
-                let mut c = sets[0].to_vec();
-                for s in &sets[1..] {
-                    c = and(&c, s);
-                }
-                let (mut k, mut need) = (0, vec![]);
-                while k < v.len() {
-                    let mut e = k;
-                    while e + 1 < v.len() && v[e + 1] == v[k] {
-                        e += 1;
-                    }
-                    if e > k {
-                        need.push((rep[v[k] as usize], e - k + 1));
-                    }
-                    k = e + 1;
-                }
-                for (r, len) in need {
-                    let l: Vec<u32> = runs[r as usize].iter().filter(|e| e.1 as usize >= len).map(|e| e.0).collect();
-                    c = and(&c, &l);
-                }
-                c.retain(|&doc| {
-                    let (s, e) = docs[doc as usize];
-                    let mut seq = vec![];
-                    tokens(dict, &d[s as usize..e as usize], |w| seq.push(w));
-                    seq.windows(v.len()).any(|win| win == &v[..])
-                });
-                c
-            }
+            Query::Phrase(k) => pres[*k].clone(),
         };
         let mut o = Vec::new();
         write!(o, "{} {}", r.len(), r.iter().map(|&x| x as u64).sum::<u64>()).unwrap();
