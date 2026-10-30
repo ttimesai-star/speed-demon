@@ -33,37 +33,81 @@ fn par<T: Send>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     })
 }
 
-fn lower(c: u8) -> u8 {
-    c | ((c.wrapping_sub(b'A') < 26) as u8) << 5
+// Eight bytes at d[p..], little-endian, zero-padded past the end of d.
+fn word(d: &[u8], p: usize) -> u64 {
+    if p + 8 <= d.len() {
+        return u64::from_le(unsafe { (d.as_ptr().add(p) as *const u64).read_unaligned() });
+    }
+    let mut b = [0u8; 8];
+    if p < d.len() {
+        b[..d.len() - p].copy_from_slice(&d[p..]);
+    }
+    u64::from_le_bytes(b)
 }
 
-fn is_tok(c: u8) -> bool {
-    c.wrapping_sub(b'a') < 26 || c.wrapping_sub(b'0') < 10
+const ONES: u64 = 0x0101_0101_0101_0101;
+const HI: u64 = 0x8080_8080_8080_8080;
+
+// High bit of each byte of w in [a, b]; bytes of 0x80 and above never match.
+fn range(w: u64, a: u8, b: u8) -> u64 {
+    let x = w & !HI;
+    (x + (0x80 - a as u64) * ONES) & !(x + (0x7F - b as u64) * ONES) & !w & HI
 }
 
-fn hash(h: u64, c: u8) -> u64 {
-    (h ^ c as u64).wrapping_mul(0x100_0000_01b3)
+fn lower8(w: u64) -> u64 {
+    w | range(w, b'A', b'Z') >> 2
 }
 
-// The query terms: open addressing over (offset in queries.txt + 1) << 8 | length, with their ids.
+// High bit of each byte that belongs to a token (a-z, 0-9 after ASCII-lowercasing).
+fn tokmask(w: u64) -> u64 {
+    let l = lower8(w);
+    range(l, b'a', b'z') | range(l, b'0', b'9')
+}
+
+// The lowercased k-th word of the token d[s..s+n], bytes past n zeroed.
+fn tword(d: &[u8], s: usize, n: usize, k: usize) -> u64 {
+    lower8(word(d, s + 8 * k)) & u64::MAX >> 8 * (8 - (n - 8 * k).min(8)) as u32 % 64
+}
+
+fn thash(d: &[u8], s: usize, n: usize) -> u64 {
+    (0..n.div_ceil(8)).fold(n as u64, |h, k| (h ^ tword(d, s, n, k)).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+// The query terms: open addressing over hash tag << 32 | (id + 1); the bytes are checked against queries.txt.
 struct Dict<'a> {
     q: &'a [u8],
-    slots: Vec<(u64, u32)>,
+    terms: Vec<(usize, usize)>,
+    slots: Vec<u64>,
 }
 
 impl Dict<'_> {
-    // Id of the lowercased token whose bytes are d[s..s+n] and whose hash is h, or NONE.
-    fn get(&self, d: &[u8], s: usize, n: usize, h: u64) -> u32 {
+    fn new(q: &[u8], terms: Vec<(usize, usize)>) -> Dict<'_> {
+        let mut slots = vec![0u64; (4 * terms.len()).next_power_of_two().max(16)];
+        for (id, &(o, n)) in terms.iter().enumerate() {
+            let h = thash(q, o, n);
+            let mut i = (h >> 40) as usize & (slots.len() - 1);
+            while slots[i] != 0 {
+                i = (i + 1) & (slots.len() - 1);
+            }
+            slots[i] = (h >> 8) << 32 | (id as u64 + 1);
+        }
+        Dict { q, terms, slots }
+    }
+    // Id of the token d[s..s+n] (lowercased), or NONE.
+    fn get(&self, d: &[u8], s: usize, n: usize) -> u32 {
+        let h = thash(d, s, n);
         let m = self.slots.len() - 1;
-        let mut i = (h >> 32) as usize & m;
+        let mut i = (h >> 40) as usize & m;
         loop {
-            let (k, id) = self.slots[i];
-            if k == 0 {
+            let e = self.slots[i];
+            if e == 0 {
                 return NONE;
             }
-            let (o, l) = ((k >> 8) as usize - 1, (k & 255) as usize);
-            if l == n && (0..n).all(|j| lower(d[s + j]) == self.q[o + j]) {
-                return id;
+            if e >> 32 == (h >> 8) & 0xFFFF_FFFF {
+                let (o, l) = self.terms[(e as u32 - 1) as usize];
+                if l == n && (0..n.div_ceil(8)).all(|k| tword(d, s, n, k) == tword(self.q, o, n, k)) {
+                    return e as u32 - 1;
+                }
             }
             i = (i + 1) & m;
         }
@@ -74,16 +118,23 @@ impl Dict<'_> {
 fn tokens(dict: &Dict, text: &[u8], mut f: impl FnMut(u32)) {
     let mut p = 0;
     while p < text.len() {
-        if !is_tok(lower(text[p])) {
-            p += 1;
+        let m = tokmask(word(text, p));
+        if m == 0 {
+            p += 8;
             continue;
         }
-        let (s, mut h) = (p, 0xcbf2_9ce4_8422_2325u64);
-        while p < text.len() && is_tok(lower(text[p])) {
-            h = hash(h, lower(text[p]));
-            p += 1;
+        p += m.trailing_zeros() as usize / 8;
+        let mut n = 0;
+        loop {
+            let z = !tokmask(word(text, p + n)) & HI;
+            if z != 0 {
+                n += z.trailing_zeros() as usize / 8;
+                break;
+            }
+            n += 8;
         }
-        f(if p - s > 32 { NONE } else { dict.get(text, s, p - s, h) });
+        f(if n > 32 { NONE } else { dict.get(text, p, n) });
+        p += n;
     }
 }
 
@@ -143,22 +194,9 @@ fn main() {
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     // Queries and the dictionary of their terms.
     let mut terms: Vec<(usize, usize)> = vec![]; // (offset, length) of each distinct term
-    let mut slots = vec![(0u64, 0u32); 1 << 20];
+    let mut ids: std::collections::HashMap<&[u8], u32> = Default::default();
     let mut id_of = |o: usize, n: usize| -> u32 {
-        let h = q[o..o + n].iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &c| hash(h, c));
-        let dict = Dict { q: &q, slots: std::mem::take(&mut slots) };
-        let id = dict.get(&q, o, n, h);
-        slots = dict.slots;
-        if id != NONE {
-            return id;
-        }
-        let mut i = (h >> 32) as usize & (slots.len() - 1);
-        while slots[i].0 != 0 {
-            i = (i + 1) & (slots.len() - 1);
-        }
-        slots[i] = (((o + 1) as u64) << 8 | n as u64, terms.len() as u32);
-        terms.push((o, n));
-        terms.len() as u32 - 1
+        *ids.entry(&q[o..o + n]).or_insert_with(|| (terms.push((o, n)), terms.len() as u32 - 1).1)
     };
     let mut qs = vec![];
     for line in q.split(|&c| c == b'\n').filter(|l| !l.is_empty()) {
@@ -182,7 +220,7 @@ fn main() {
         }
     }
     let nterms = terms.len();
-    let dict = Dict { q: &q, slots };
+    let dict = Dict::new(&q, terms);
     // A term that a phrase repeats k times in a row: each document's longest run of it is recorded.
     let mut rep = vec![NONE; nterms]; // index into the run lists
     let mut nrep = 0;
