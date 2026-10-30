@@ -6,7 +6,8 @@ use std::{env, fs, thread};
 
 const SLOTS: usize = 4096; // endpoint hash table; the catalogue has 1,842 templates
 const HOURS: usize = 72; // the span is fixed by the spec: 2026-10-30T18 .. 2026-11-02T17
-type Hour = (Vec<u32>, Vec<u16>); // latencies and slot | 5xx << 12, one entry per line
+// Per line: low 16 bits of the latency, slot | 5xx << 12 | big << 13; high 16 bits only for big latencies.
+type Hour = (Vec<u16>, Vec<u16>, Vec<u16>);
 
 #[cfg(unix)]
 fn load(path: &str) -> &'static [u8] {
@@ -69,7 +70,7 @@ fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
 // Parses the lines in d[a..b] into one (latencies, slots) pair per hour.
 fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
     let cap = (b - a) / 40 + 1; // a line has at least 40 bytes, so no vector ever grows
-    let mut out: Vec<Hour> = (0..HOURS).map(|_| (Vec::with_capacity(cap), Vec::with_capacity(cap))).collect();
+    let mut out: Vec<Hour> = (0..HOURS).map(|_| (Vec::with_capacity(cap), Vec::with_capacity(cap), Vec::with_capacity(cap))).collect();
     let mut i = a;
     while i < b {
         let num = |k: usize| (d[i + k] - b'0') as usize * 10 + (d[i + k + 1] - b'0') as usize;
@@ -103,8 +104,12 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
                 p += 1;
             }
         }
-        out[hour].0.push(v);
-        out[hour].1.push(sl);
+        let o = &mut out[hour];
+        o.0.push(v as u16);
+        o.1.push(sl | ((v > 0xFFFF) as u16) << 13);
+        if v > 0xFFFF {
+            o.2.push((v >> 16) as u16);
+        }
         i = p + 1;
     }
     out
@@ -155,7 +160,7 @@ fn main() {
                     (cnt.fill(0), errs.fill(0), buf.clear());
                     for &m in recs.iter().flat_map(|r| &r.1) {
                         cnt[(m & 4095) as usize + 1] += 1;
-                        errs[(m & 4095) as usize] += (m >> 12) as u32;
+                        errs[(m & 4095) as usize] += (m >> 12 & 1) as u32;
                     }
                     for s in 0..SLOTS {
                         cnt[s + 1] += cnt[s];
@@ -163,7 +168,9 @@ fn main() {
                     cur.copy_from_slice(&cnt[..SLOTS]);
                     lat.resize(cnt[SLOTS] as usize, 0);
                     for r in &recs {
-                        for (&v, &m) in r.0.iter().zip(&r.1) {
+                        let mut hi = r.2.iter();
+                        for (&lo, &m) in r.0.iter().zip(&r.1) {
+                            let v = lo as u32 | if m >> 13 != 0 { (*hi.next().unwrap() as u32) << 16 } else { 0 };
                             lat[cur[(m & 4095) as usize] as usize] = v;
                             cur[(m & 4095) as usize] += 1;
                         }
