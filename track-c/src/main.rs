@@ -197,13 +197,19 @@ fn main() {
             .map(|k| {
                 sc.spawn(move || {
                     let mut agg = vec![ZERO; nc + 1];
-                    let mut pend = None;
-                    let mark = |(ns, nn, i, g): (usize, usize, usize, usize)| {
-                        let nid = if nn == 0 { 0 } else { name_id(tab, arena, top, d, ns, nn, i) } as usize;
-                        let w = &seen[g * IDS / 64 + nid / 64];
-                        if w.load(Relaxed) & 1 << (nid % 64) == 0 {
-                            w.fetch_or(1 << (nid % 64), Relaxed);
+                    let (mut pend, mut bit) = (None, None);
+                    let set = |(k, b): (usize, u64)| {
+                        if seen[k].load(Relaxed) & b == 0 {
+                            seen[k].fetch_or(b, Relaxed);
                         }
+                    };
+                    // Stage 2 of 3: the name's id, then a prefetch of its word in the country's bitset; the
+                    // bit itself is set one record later (stage 3).
+                    let mut mark = |(ns, nn, i, g): (usize, usize, usize, usize)| {
+                        let nid = if nn == 0 { 0 } else { name_id(tab, arena, top, d, ns, nn, i) } as usize;
+                        let k = g * IDS / 64 + nid / 64;
+                        unsafe { std::arch::x86_64::_mm_prefetch::<3>(seen.as_ptr().add(k) as *const i8) };
+                        bit.replace((k, 1u64 << (nid % 64))).map(set);
                     };
                     let mut p = bs[k];
                     while p < bs[k + 1] {
@@ -236,7 +242,8 @@ fn main() {
                             mark(x);
                         }
                     }
-                    pend.map(mark);
+                    pend.map(&mut mark);
+                    bit.map(set);
                     agg
                 })
             })
