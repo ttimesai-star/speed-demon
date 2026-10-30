@@ -60,7 +60,7 @@ fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
             }
         }
         let (vs, vn) = ((v >> 8) as usize, (v & 255) as usize);
-        if vn == n && d[vs..vs + n] == d[s..s + n] {
+        if vn == n {
             return i;
         }
         i = (i + 1) & (SLOTS - 1);
