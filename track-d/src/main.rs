@@ -80,13 +80,17 @@ impl Side {
     fn start(&mut self, s: usize) {
         (self.d[s] = 0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
     }
-    // Settles the nearest node; `best` takes every path that meets the other half. False if a sum does
+    // Settles the nearest node; `best` takes its sum with the other half's label (checking at settle time
+    // is enough for the stop rule top + top >= best). False if a sum does
     // not fit in u32 (the weights near 2^32 on the special nodes): the query then goes to `wide`.
     fn step(&mut self, off: &[u32], adj: &[(u32, u32)], other: &[u32], best: &mut u64) -> bool {
         let Reverse(e) = self.h.pop().unwrap();
         let (du, u) = (e >> 32, e as u32 as usize);
         if du > self.d[u] as u64 {
             return true;
+        }
+        if other[u] != u32::MAX {
+            *best = (*best).min(du + other[u] as u64);
         }
         for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
             let (v, nd) = (v as usize, du + w as u64);
@@ -98,9 +102,6 @@ impl Side {
                     self.seen.push(v as u32);
                 }
                 (self.d[v] = nd as u32, self.h.push(Reverse(nd << 32 | v as u64)));
-            }
-            if other[v] != u32::MAX {
-                *best = (*best).min(nd + other[v] as u64);
             }
         }
         true
