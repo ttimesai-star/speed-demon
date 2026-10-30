@@ -80,11 +80,13 @@ struct Dict<'a> {
     q: &'a [u8],
     terms: Vec<(usize, usize)>,
     slots: Vec<u64>,
+    bloom: Vec<u64>, // one bit per term hash, 128 KB: most tokens that are no term stop here
 }
 
 impl Dict<'_> {
     fn new(q: &[u8], terms: Vec<(usize, usize)>) -> Dict<'_> {
         let mut slots = vec![0u64; (4 * terms.len()).next_power_of_two().max(16)];
+        let mut bloom = vec![0u64; 1 << 14];
         for (id, &(o, n)) in terms.iter().enumerate() {
             let h = thash(q, o, n);
             let mut i = (h >> 40) as usize & (slots.len() - 1);
@@ -92,12 +94,16 @@ impl Dict<'_> {
                 i = (i + 1) & (slots.len() - 1);
             }
             slots[i] = (h >> 8) << 32 | (id as u64 + 1);
+            bloom[(h >> 50) as usize] |= 1 << (h & 63);
         }
-        Dict { q, terms, slots }
+        Dict { q, terms, slots, bloom }
     }
     // Id of the token d[s..s+n] (lowercased), or NONE.
     fn get(&self, d: &[u8], s: usize, n: usize) -> u32 {
         let h = thash(d, s, n);
+        if self.bloom[(h >> 50) as usize] >> (h & 63) & 1 == 0 {
+            return NONE;
+        }
         let m = self.slots.len() - 1;
         let mut i = (h >> 40) as usize & m;
         loop {
@@ -340,7 +346,7 @@ fn main() {
                 for &(k, j) in &trig[w as usize] {
                     let v = &phr[k as usize];
                     let s = at.wrapping_sub(j as usize);
-                    if s <= at && s + v.len() <= seq.len() && seq[s..s + v.len()] == v[..] && lastm[k as usize] != id {
+                    if s <= at && s + v.len() <= seq.len() && (0..v.len()).all(|j| seq[s + j] == v[j]) && lastm[k as usize] != id {
                         (lastm[k as usize] = id, found.push((k, id)));
                     }
                 }
