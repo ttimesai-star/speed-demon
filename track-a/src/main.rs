@@ -147,7 +147,7 @@ fn main() {
     let key = |s: usize| tab[s].load(Relaxed);
     let ep = |s: usize| &d[(key(s) >> 8) as usize..][..(key(s) & 255) as usize];
     let mut order: Vec<usize> = (0..SLOTS).filter(|&s| key(s) != 0).collect();
-    order.sort_by_key(|&s| ep(s));
+    order.sort_unstable_by_key(|&s| ep(s));
     fs::create_dir_all(&dout).unwrap();
     let f = fs::File::create(format!("{dout}/summary.txt")).unwrap();
     // Workers take hours in order; whoever holds `ready` writes every finished buffer that is next.
