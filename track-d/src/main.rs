@@ -63,6 +63,32 @@ fn edges(d: &[u8], a: usize, b: usize, mut f: impl FnMut(usize, usize, u32)) {
     }
 }
 
+// Radix heap of entries dist << 32 | node with monotone dist: bucket i holds dists that first differ
+// from the last popped one in bit i - 1.
+struct Radix {
+    last: u64,
+    b: Vec<Vec<u64>>,
+}
+
+impl Radix {
+    fn push(&mut self, e: u64) {
+        self.b[(64 - ((e >> 32) ^ self.last).leading_zeros()) as usize].push(e);
+    }
+    fn pop(&mut self) -> Option<u64> {
+        if self.b[0].is_empty() {
+            let i = (1..33).find(|&i| !self.b[i].is_empty())?;
+            self.last = self.b[i].iter().min().unwrap() >> 32;
+            for e in std::mem::take(&mut self.b[i]) {
+                self.push(e);
+            }
+        }
+        self.b[0].pop()
+    }
+    fn clear(&mut self) {
+        (self.last = 0, self.b.iter_mut().for_each(Vec::clear));
+    }
+}
+
 // The same search with u64 distances in a hash map, for the few queries whose sums pass 2^32 - 2.
 fn wide(off: &[u32], adj: &[(u32, u32)], s: usize, t: usize) -> u64 {
     let (mut dist, mut heap) = (HashMap::from([(s, 0u64)]), BinaryHeap::from([Reverse((0u64, s))]));
@@ -210,7 +236,8 @@ fn main() {
         for _ in 0..nt {
             let (qs, ans, next) = (&qs, &ans, &next);
             sc.spawn(move || {
-                let (mut dist, mut seen, mut heap) = (vec![u32::MAX; n], vec![], BinaryHeap::new());
+                let (mut dist, mut seen) = (vec![u32::MAX; n], vec![]);
+                let mut heap = Radix { last: 0, b: vec![vec![]; 33] };
                 loop {
                     let i = next.fetch_add(1, Relaxed);
                     let Some(&(s0, q0)) = qs.get(i) else { break };
@@ -220,8 +247,8 @@ fn main() {
                         r = 0;
                     } else if ind[q0].load(Relaxed) > 0 && off[s] < off[s + 1] {
                         // u32 distances, heap entries dist << 32 | node; a sum that does not fit goes to `wide`.
-                        (dist[s] = 0, seen.push(s as u32), heap.push(Reverse(s as u64)));
-                        while let Some(Reverse(e)) = heap.pop() {
+                        (dist[s] = 0, seen.push(s as u32), heap.push(s as u64));
+                        while let Some(e) = heap.pop() {
                             let (du, u) = (e >> 32, e as u32 as usize);
                             if du > dist[u] as u64 {
                                 continue;
@@ -242,7 +269,7 @@ fn main() {
                                         seen.push(v as u32);
                                     }
                                     dist[v] = nd as u32;
-                                    heap.push(Reverse(nd << 32 | v as u64));
+                                    heap.push(nd << 32 | v as u64);
                                 }
                             }
                         }
