@@ -29,7 +29,7 @@ Every row passed the seed-1 full hash `495ca096…1cd3` and the seed-1 sample ha
 | 9 | 2d1fe2d | One `u32` record per line, `(slot \| 5xx << 12 \| big << 13) << 16 \| latency & 0xFFFF`, instead of two `u16` vectors: one push per line instead of two | — | — | — | A/B: 103.4 vs 106.0 ms for step 8 (−2.5 %) |
 | 10 | 3170785 | Hour index from one 8-byte load of `MM-DDTHH` (low nibbles) instead of five bounds-checked byte loads | — | — | — | A/B: 116.6 vs 117.8 ms for step 9 (−1 %) |
 | 11 | 806d0d8 | PGO: instrumented build, training run on a 60,000-line slice of the seed-2 sample (`pgo/`, data, not code; seed 2 so the profile is not fitted to the board's seed), `llvm-profdata merge`, rebuild, all inside the same seven Dockerfile lines, from the allowlisted `halloumee/speed-demon-rust:1.99.1-trixie-llvm-tools` | board push 16:20 UTC, team not on the board yet | 0.144 | 18.5 | A/B (Docker-built): 114.8 vs 117.8 ms for step 9 (−2.5 %); CI-harness on a different CPU (EPYC 9V74) |
-| 12 | 515ff24 | Iterative digit printer that writes the leading space with the digits in one `extend` (the recursive one was 4.7 % in `perf`, not inlined); unstable sort for the endpoint order | — | — | — | A/B (Docker-built): 136.0 vs 138.3 ms for step 11 (−1.6 %) |
+| 12 | 515ff24 | Iterative digit printer that writes the leading space with the digits in one `extend` (the recursive one was 4.7 % in `perf`, not inlined); unstable sort for the endpoint order | board push 16:35 UTC, team not on the board yet | 0.137 | 18.5 | A/B (Docker-built): 136.0 vs 138.3 ms for step 11 (−1.6 %); CI-harness on EPYC 7763, the CPU of steps 1–2 |
 
 ## Measurements that decided the design
 
