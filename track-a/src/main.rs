@@ -82,9 +82,9 @@ fn put(b: &mut Vec<u8>, mut x: usize) {
 
 // Parses the lines in d[a..b] into per-hour records.
 fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
-    let c = (b - a) / 4096; // ~1.3x the mean hour; small enough that no huge page is touched in vain
+    let c = (b - a) / 40 + 1; // a line has >= 40 bytes: no vector grows; untouched reserve costs nothing
     let mut out: Vec<Hour> = (0..HOURS)
-        .map(|_| (Vec::with_capacity(c), Vec::with_capacity(c / 4)))
+        .map(|_| (Vec::with_capacity(c), Vec::with_capacity(c)))
         .collect();
     let mut i = a;
     while i < b {
