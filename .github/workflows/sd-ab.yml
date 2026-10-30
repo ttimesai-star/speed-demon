@@ -1,4 +1,5 @@
-# A/B timing of several commits of one track in the same VM (native binaries, interleaved runs).
+# A/B timing of several commits of one track in the same VM: each built by its own Dockerfile, offline,
+# binary copied out of the image and run natively, runs interleaved.
 # Tooling outside track-*, not counted in S. Usage: gh workflow run sd-ab.yml -f refs="sha1 sha2" -f track=a
 name: sd-ab
 on:
@@ -31,7 +32,8 @@ jobs:
           mkdir -p bins
           for r in ${{ inputs.refs }}; do
             rm -rf /tmp/wt && git worktree add -f /tmp/wt $r
-            (cd /tmp/wt/track-${{ inputs.track }} && cargo build --release -q) && cp /tmp/wt/track-${{ inputs.track }}/target/release/solution bins/$r
+            docker build -q --network=none -t ab-$r /tmp/wt/track-${{ inputs.track }} >/dev/null
+            c=$(docker create ab-$r) && docker cp $c:/app/solution bins/$r && docker rm $c >/dev/null
             git worktree remove -f /tmp/wt
           done
           ls -la bins; nproc

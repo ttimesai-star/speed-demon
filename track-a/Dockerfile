@@ -1,7 +1,7 @@
-FROM rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb AS build
+FROM halloumee/speed-demon-rust:1.99.1-trixie-llvm-tools@sha256:13e4ee7135d8eac6c56476c7d1aee201f36479f4745fd5d0e6b4529f4e13251a AS build
 WORKDIR /src
 COPY . .
-RUN cargo build --release --offline
+RUN F="-Ctarget-cpu=x86-64-v3 -Cprofile" && RUSTFLAGS="$F-generate=/tmp/pgo" cargo build --release --offline && target/release/solution pgo /tmp && llvm-profdata merge -o /tmp/m.profdata /tmp/pgo && RUSTFLAGS="$F-use=/tmp/m.profdata" cargo build --release --offline
 FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 COPY --from=build /src/target/release/solution /app/solution
 ENTRYPOINT ["/app/solution"]
