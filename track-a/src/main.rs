@@ -88,13 +88,14 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
         loop {
             let w = word(d, p);
             let z = eq_bytes(w, b' ' as u64);
-            let k = z.trailing_zeros() as usize / 8;
-            h = (h ^ w & !(!0u64).checked_shl(8 * k as u32).unwrap_or(0) ^ (p + k - s) as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            p += k.min(8);
             if z != 0 {
+                let k = z.trailing_zeros() as usize / 8;
+                h = (h ^ (w & ((1u64 << (8 * k)) - 1)) ^ (p + k - s) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                p += k;
                 break;
             }
+            h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            p += 8;
         }
         let sl = slot(tab, d, s, p - s, h) as u16 | ((d[p + 1] == b'5') as u16) << 12;
         let w = word(d, p + 5);
