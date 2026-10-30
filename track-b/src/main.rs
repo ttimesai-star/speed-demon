@@ -1,4 +1,5 @@
 // Speed Demon 2026, track B (Index). Spec: specs/b-index.md in hackathon-raptors/speed-demon-2026.
+use std::borrow::Cow;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::OnceLock;
@@ -63,14 +64,6 @@ const ONES: u64 = 0x0101_0101_0101_0101;
 
 // Offset of the first byte c in d[p..], eight bytes at a time (exact zero-byte test).
 fn find(d: &[u8], mut p: usize, c: u8) -> usize {
-    use std::arch::x86_64::*; // 32 bytes at a time while they fit (x86-64-v3 has AVX2), then 8
-    while p + 32 <= d.len() {
-        let v = unsafe { _mm256_cmpeq_epi8(_mm256_loadu_si256(d.as_ptr().add(p) as *const _), _mm256_set1_epi8(c as i8)) };
-        match unsafe { _mm256_movemask_epi8(v) } as u32 {
-            0 => p += 32,
-            m => return p + m.trailing_zeros() as usize,
-        }
-    }
     loop {
         let x = word(d, p) ^ c as u64 * ONES;
         let z = !(((x & !HI) + !HI) | x) & HI;
@@ -230,7 +223,7 @@ fn not(a: &[u32], b: &[u32]) -> Vec<u32> {
 
 #[derive(Clone)]
 enum Set {
-    List(Vec<u32>), // sorted document ids
+    List(Cow<'static, [u32]>), // sorted document ids: a term's list borrows the shared buffer
     Bits(Vec<u64>), // bit i = document base + i
 }
 
@@ -270,12 +263,12 @@ fn apply(r: Set, op: u8, s: &Set, words: usize) -> Set {
     use Set::*;
     let has = |b: &[u64], x: u32| b[x as usize / 64] >> (x % 64) & 1 != 0;
     match (op, r, s) {
-        (b'A', List(a), List(c)) => List(and(&a, c)),
-        (b'O', List(a), List(c)) => List(or(&a, c)),
-        (_, List(a), List(c)) => List(not(&a, c)),
-        (b'A', List(a), Bits(c)) => List(a.into_iter().filter(|&x| has(c, x)).collect()),
-        (b'A', Bits(a), List(c)) => List(c.iter().copied().filter(|&x| has(&a, x)).collect()),
-        (b'N', List(a), Bits(c)) => List(a.into_iter().filter(|&x| !has(c, x)).collect()),
+        (b'A', List(a), List(c)) => List(and(&a, c).into()),
+        (b'O', List(a), List(c)) => List(or(&a, c).into()),
+        (_, List(a), List(c)) => List(not(&a, c).into()),
+        (b'A', List(a), Bits(c)) => List(a.iter().copied().filter(|&x| has(c, x)).collect::<Vec<_>>().into()),
+        (b'A', Bits(a), List(c)) => List(c.iter().copied().filter(|&x| has(&a, x)).collect::<Vec<_>>().into()),
+        (b'N', List(a), Bits(c)) => List(a.iter().copied().filter(|&x| !has(c, x)).collect::<Vec<_>>().into()),
         (_, r, s) => {
             let mut a = r.bits(words);
             match s {
@@ -284,19 +277,6 @@ fn apply(r: Set, op: u8, s: &Set, words: usize) -> Set {
             }
             Bits(a)
         }
-    }
-}
-
-// A multiplicative hasher for the term map (SipHash was most of the query parse).
-#[derive(Default)]
-struct Fx(u64);
-
-impl std::hash::Hasher for Fx {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    fn write(&mut self, b: &[u8]) {
-        self.0 = b.iter().fold(self.0, |h, &c| (h.rotate_left(5) ^ c as u64).wrapping_mul(0x517c_c1b7_2722_0a95));
     }
 }
 
@@ -311,7 +291,7 @@ fn main() {
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     // Queries and the dictionary of their terms.
     let mut terms: Vec<(usize, usize)> = vec![]; // (offset, length) of each distinct term
-    let mut ids: std::collections::HashMap<&[u8], u32, std::hash::BuildHasherDefault<Fx>> = Default::default();
+    let mut ids: std::collections::HashMap<&[u8], u32> = Default::default();
     let mut id_of = |o: usize, n: usize| -> u32 {
         *ids.entry(&q[o..o + n]).or_insert_with(|| (terms.push((o, n)), terms.len() as u32 - 1).1)
     };
@@ -439,17 +419,20 @@ fn main() {
             .map(|w| {
                 let mut len = 0; // and where each thread starts in the list
                 let st: Vec<u32> = pr.iter().map(|x| (len, len += x.cnt[w]).0).collect();
-                match len as usize * 32 < n && pr.iter().all(|x| x.bit[w] == NONE) {
-                    true => (Set::List(Vec::with_capacity(len as usize)), st), // no zero fill: untouched
-                    false => (Set::Bits(vec![0; words]), st),
-                }
+                ((len as usize, len as usize * 32 >= n || pr.iter().any(|x| x.bit[w] != NONE)), st)
             })
             .collect::<Vec<_>>()
     });
-    let (mut sets, starts): (Vec<Set>, Vec<Vec<u32>>) = sized.into_iter().flatten().unzip();
-    sets.iter_mut().for_each(|s| if let Set::List(l) = s { unsafe { l.set_len(l.capacity()) } }); // the layout writes every slot
-    let ptrs: Vec<usize> = sets.iter_mut().map(|s| match s { Set::List(l) => l.as_mut_ptr() as usize, Set::Bits(b) => b.as_mut_ptr() as usize }).collect();
-    let big: Vec<bool> = sets.iter().map(|s| matches!(s, Set::Bits(_))).collect();
+    let (meta, starts): (Vec<(usize, bool)>, Vec<Vec<u32>>) = sized.into_iter().flatten().unzip();
+    // All lists in one zeroed buffer: one mapping, whose pages are touched only as the layout writes them.
+    let mut off = vec![0usize; nterms + 1];
+    for w in 0..nterms {
+        off[w + 1] = off[w] + if meta[w].1 { 0 } else { meta[w].0 };
+    }
+    let buf: &'static mut [u32] = vec![0u32; off[nterms]].leak();
+    let mut bits: Vec<Vec<u64>> = meta.iter().map(|m| if m.1 { vec![0; words] } else { vec![] }).collect();
+    let ptrs: Vec<usize> = (0..nterms).map(|w| match meta[w].1 { true => bits[w].as_mut_ptr() as usize, false => buf.as_mut_ptr().wrapping_add(off[w]) as usize }).collect();
+    let big: Vec<bool> = meta.iter().map(|m| m.1).collect();
     let (ptrs, big, starts) = (&ptrs, &big, &starts);
     par(nt, |t| {
         let (x, mut cur) = (&pr[t], starts.iter().map(|s| s[t]).collect::<Vec<u32>>());
@@ -476,6 +459,8 @@ fn main() {
         }
     });
     drop(parts);
+    let buf: &'static [u32] = buf;
+    let sets: Vec<Set> = bits.into_iter().enumerate().map(|(w, b)| match big[w] { true => Set::Bits(b), false => Set::List(Cow::Borrowed(&buf[off[w]..off[w + 1]])) }).collect();
     // Queries on all threads, answers by index.
     let ans: Vec<OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| OnceLock::new()).collect();
     let next = AtomicUsize::new(0);
@@ -491,7 +476,7 @@ fn main() {
                 }
                 r
             }
-            Query::Phrase(k) => Set::List(pres[*k].clone()),
+            Query::Phrase(k) => Set::List(pres[*k].clone().into()),
         };
         let (count, sum) = match &r {
             Set::List(l) => (l.len() as u64, l.iter().map(|&x| x as u64).sum::<u64>()),
