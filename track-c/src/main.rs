@@ -24,7 +24,7 @@ fn load(path: &str) -> &'static [u8] {
     fs::read(path).unwrap().leak()
 }
 
-const SLOTS: usize = 1 << 19; // name table; the generator's pool has 100,000 names (ids < 2^20)
+const SLOTS: usize = 1 << 18; // name table; the generator's pool has 100,000 names (ids < 2^20)
 const IDS: usize = 1 << 20; // bits per country bitset, only the touched pages cost memory
 
 // Zeroed atomics from calloc'd memory, so untouched pages are never faulted in.
@@ -169,7 +169,7 @@ fn main() {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
                 let c = &d[nom[k]..nom[k + 1]];
-                sc.spawn(move || c.iter().filter(|&&b| b == b'"').count())
+                sc.spawn(move || c.chunks(32).map(|x| x.iter().map(|&b| (b == b'"') as u8).sum::<u8>() as usize).sum())
             })
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
