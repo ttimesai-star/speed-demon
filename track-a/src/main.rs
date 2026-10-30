@@ -13,6 +13,7 @@ type Hour = (Vec<u32>, Vec<u16>);
 
 extern "C" {
     fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn prctl(op: i32, ...) -> i32;
 }
 
 fn load(path: &str) -> &'static [u8] {
@@ -128,6 +129,7 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
 fn main() {
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
+    unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) }; // PR_SET_THP_DISABLE: small vectors, no 2 MB pages
     let d = load(&format!("{din}/requests.log"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
     let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
