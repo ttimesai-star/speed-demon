@@ -64,7 +64,6 @@ fn edges(d: &[u8], a: usize, b: usize, mut f: impl FnMut(usize, usize, u32)) {
 }
 
 // One half of a bidirectional Dijkstra search: u32 distances, touched nodes, heap of dist << 32 | node.
-// d holds !dist, so a zeroed (calloc'd) array means "not reached" and needs no fill pass.
 struct Side {
     d: Vec<u32>,
     seen: Vec<u32>,
@@ -73,13 +72,13 @@ struct Side {
 
 impl Side {
     fn new(n: usize) -> Side {
-        Side { d: vec![0; n], seen: vec![], h: BinaryHeap::new() }
+        Side { d: vec![u32::MAX; n], seen: vec![], h: BinaryHeap::new() }
     }
     fn top(&self) -> u64 {
         self.h.peek().map_or(u64::MAX, |r| r.0 >> 32)
     }
     fn start(&mut self, s: usize) {
-        (self.d[s] = !0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
+        (self.d[s] = 0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
     }
     // Settles the nearest node; `best` takes its sum with the other half's label (checking at settle time
     // is enough for the stop rule top + top >= best). False if a sum does
@@ -87,29 +86,29 @@ impl Side {
     fn step(&mut self, off: &[u32], adj: &[(u32, u32)], other: &[u32], best: &mut u64) -> bool {
         let Reverse(e) = self.h.pop().unwrap();
         let (du, u) = (e >> 32, e as u32 as usize);
-        if du > !self.d[u] as u64 {
+        if du > self.d[u] as u64 {
             return true;
         }
-        if other[u] != 0 {
-            *best = (*best).min(du + !other[u] as u64);
+        if other[u] != u32::MAX {
+            *best = (*best).min(du + other[u] as u64);
         }
         for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
             let (v, nd) = (v as usize, du + w as u64);
             if nd >= u32::MAX as u64 {
                 return false;
             }
-            if nd < !self.d[v] as u64 {
-                if self.d[v] == 0 {
+            if nd < self.d[v] as u64 {
+                if self.d[v] == u32::MAX {
                     self.seen.push(v as u32);
                 }
-                (self.d[v] = !(nd as u32), self.h.push(Reverse(nd << 32 | v as u64)));
+                (self.d[v] = nd as u32, self.h.push(Reverse(nd << 32 | v as u64)));
             }
         }
         true
     }
     fn reset(&mut self) {
         for &v in &self.seen {
-            self.d[v as usize] = 0;
+            self.d[v as usize] = u32::MAX;
         }
         (self.seen.clear(), self.h.clear());
     }
