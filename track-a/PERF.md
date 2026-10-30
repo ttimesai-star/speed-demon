@@ -34,7 +34,7 @@ Every row passed the seed-1 full hash `495ca096…1cd3` and the seed-1 sample ha
 - Ablation (PC): number formatting with `write!` costs ~1 ms, the file write ~0.5 ms; freeing the
   per-hour vectors ~3 ms on Windows (kept: it holds M down while the output grows).
 
-| 7 | (this) | `word()`: one length check and an unaligned load instead of `d.get(p..p + 8)` + `try_into` (the range checks showed up as 6–7 % in `perf`) | — | — | — | A/B: 116.9 ms vs 122.2 ms for step 6 (−4.3 %) |
+| 7 | 840f966 | `word()`: one length check and an unaligned load instead of `d.get(p..p + 8)` + `try_into` (the range checks showed up as 6–7 % in `perf`) | — | — | — | A/B: 116.9 ms vs 122.2 ms for step 6 (−4.3 %) |
 
 ## Linux `perf` profile (step 6, 2 threads)
 
@@ -69,4 +69,14 @@ Formatting was the largest single piece of "select + format", hence step 5.
   glibc `bcmp` still wins. Reverted.
 - **`madvise(MADV_POPULATE_READ)` on each thread's chunk** (exp-madv; A/B 98.3 vs 95.8 ms, +2.6 %):
   populating the page tables up front costs more than the fault-around path. Not taken.
+- **Endpoint hash from the length, the first 16 bytes and the last 8**, computed after the scan so the scan
+  loop has no multiply chain (exp-hash3; A/B 122.8 vs 116.6 ms, +5 %): more probes and the extra loads cost
+  more than the shorter loop saved. Not taken.
+
+## Pending
+
+- **PGO** (exp-pgo): `halloumee/speed-demon-rust:1.99.1-trixie-llvm-tools`, instrumented build, training run on
+  a 60,000-line slice of the seed-2 sample (committed as data in `pgo/`; seed 2 so the profile is not fitted to
+  the board's seed), `llvm-profdata merge`, rebuild. Same seven Dockerfile lines. A/B with Docker-built binaries:
+  115.6 vs 118.1 ms (−2.1 %). To be applied last, because the profile follows the code.
 
