@@ -388,22 +388,25 @@ fn main() {
     // Exact sizes, then each thread lays its stream and bitsets into the final sets: a bitset of all n
     // documents for a term that some thread turned into one or that is long, else a list.
     let words = n / 64 + 1;
-    let mut sets: Vec<Set> = (0..nterms)
-        .map(|w| {
-            let len: usize = parts.iter().map(|x| x.cnt[w] as usize).sum();
-            match len * 32 < n && parts.iter().all(|x| x.bit[w] == NONE) {
-                true => Set::List(vec![0; len]),
-                false => Set::Bits(vec![0; words]),
-            }
-        })
-        .collect();
-    let mut at = vec![0u32; nterms]; // where thread t starts in each list
-    let starts: Vec<Vec<u32>> = parts.iter().map(|x| (at.clone(), at.iter_mut().zip(&x.cnt).for_each(|(a, c)| *a += c)).0).collect();
+    let pr = &parts;
+    let sized = par(nt, |c| {
+        (c * nterms / nt..(c + 1) * nterms / nt)
+            .map(|w| {
+                let mut len = 0; // and where each thread starts in the list
+                let st: Vec<u32> = pr.iter().map(|x| (len, len += x.cnt[w]).0).collect();
+                match len as usize * 32 < n && pr.iter().all(|x| x.bit[w] == NONE) {
+                    true => (Set::List(vec![0; len as usize]), st),
+                    false => (Set::Bits(vec![0; words]), st),
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    let (mut sets, starts): (Vec<Set>, Vec<Vec<u32>>) = sized.into_iter().flatten().unzip();
     let ptrs: Vec<usize> = sets.iter_mut().map(|s| match s { Set::List(l) => l.as_mut_ptr() as usize, Set::Bits(b) => b.as_mut_ptr() as usize }).collect();
     let big: Vec<bool> = sets.iter().map(|s| matches!(s, Set::Bits(_))).collect();
-    let (ptrs, big, starts, pr) = (&ptrs, &big, &starts, &parts);
+    let (ptrs, big, starts) = (&ptrs, &big, &starts);
     par(nt, |t| {
-        let (x, mut cur) = (&pr[t], starts[t].clone());
+        let (x, mut cur) = (&pr[t], starts.iter().map(|s| s[t]).collect::<Vec<u32>>());
         let set = |w: usize, i: usize| unsafe { (*((ptrs[w] as *const AtomicU64).add(i / 64))).fetch_or(1 << (i % 64), Relaxed) };
         let mut e = 0;
         for (k, &end) in x.ends.iter().enumerate() {
