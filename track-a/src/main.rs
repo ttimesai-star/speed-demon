@@ -179,11 +179,11 @@ fn main() {
                         }
                         let (v, n) = (&mut lat[a..b], b - a);
                         let r = [(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1, (99 * n + 99) / 100 - 1];
-                        v.select_nth_unstable(r[2]);
-                        if r[1] < r[2] {
+                        if n <= 32 {
+                            v.sort_unstable();
+                        } else {
+                            v.select_nth_unstable(r[2]);
                             v[..r[2]].select_nth_unstable(r[1]);
-                        }
-                        if r[0] < r[1] {
                             v[..r[1]].select_nth_unstable(r[0]);
                         }
                         let e = errs[s] as u64;
