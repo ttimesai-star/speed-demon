@@ -92,7 +92,12 @@ impl Side {
         if other[u] != u32::MAX {
             *best = (*best).min(du + other[u] as u64);
         }
-        for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
+        let es = &adj[off[u] as usize..off[u + 1] as usize];
+        for &(v, _) in es {
+            // the labels of all neighbours are requested before the first one is needed
+            unsafe { std::arch::x86_64::_mm_prefetch::<3>(self.d.as_ptr().add(v as usize) as *const i8) };
+        }
+        for &(v, w) in es {
             let (v, nd) = (v as usize, du + w as u64);
             if nd >= u32::MAX as u64 {
                 return false;
