@@ -317,11 +317,10 @@ fn main() {
     let last_line = d[..d.len().saturating_sub(1)].iter().rposition(|&c| c == b'\n').map_or(0, |x| x + 1);
     let n = if d.is_empty() { 0 } else { id_at(last_line) + 1 };
     let first: Vec<usize> = (0..=nt).map(|t| if bs[t] < d.len() { id_at(bs[t]) } else { n }).collect();
-    let tf: Vec<bool> = trig.iter().map(|x| !x.is_empty()).collect(); // 75 KB instead of the list headers
-    let (dict, trig, tf, phr, bs, first) = (&dict, &trig, &tf, &phr, &bs, &first);
+    let (dict, trig, phr, bs, first) = (&dict, &trig, &phr, &bs, &first);
     let parts = par(nt, |t| {
         let range = first[t + 1] - first[t];
-        let mut st = vec![[NONE, 0, NONE]; nterms]; // per term: last document, documents, thread bitset
+        let (mut cnt, mut last, mut bit) = (vec![0u32; nterms], vec![NONE; nterms], vec![NONE; nterms]);
         let (mut stream, mut ends, mut tb) = (vec![], vec![], vec![]);
         let (mut seq, mut hits, mut found, mut lastm) = (vec![], vec![], vec![], vec![NONE; phr.len()]);
         let mut p = bs[t];
@@ -332,19 +331,18 @@ fn main() {
             let i = id as usize - first[t];
             tokens(dict, &d[tab + 1..end], |w| {
                 let u = w as usize;
-                if w != NONE && st[u][0] != id {
-                    let e = &mut st[u];
-                    e[0] = id;
-                    if e[2] == NONE {
-                        (e[1] += 1, stream.push(w));
-                        if e[1] as usize * 32 >= range {
-                            (e[2] = tb.len() as u32, tb.push(vec![0u64; range / 64 + 1]));
+                if w != NONE && last[u] != id {
+                    last[u] = id;
+                    if bit[u] == NONE {
+                        (cnt[u] += 1, stream.push(w));
+                        if cnt[u] as usize * 32 >= range {
+                            (bit[u] = tb.len() as u32, tb.push(vec![0u64; range / 64 + 1]));
                         }
                     } else {
-                        tb[e[2] as usize][i / 64] |= 1 << (i % 64);
+                        tb[bit[u] as usize][i / 64] |= 1 << (i % 64);
                     }
                 }
-                if w != NONE && tf[u] {
+                if w != NONE && !trig[u].is_empty() {
                     hits.push((seq.len(), w));
                 }
                 seq.push(w);
@@ -362,7 +360,6 @@ fn main() {
             (seq.clear(), hits.clear());
             p = end + 1;
         }
-        let (cnt, bit) = (st.iter().map(|e| e[1]).collect(), st.iter().map(|e| e[2]).collect());
         Part { cnt, bit, stream, ends, tb, found }
     });
     let mut pres: Vec<Vec<u32>> = vec![vec![]; phr.len()];
