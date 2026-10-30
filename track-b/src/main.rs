@@ -233,24 +233,25 @@ fn members(s: &Set, base: usize) -> Box<dyn Iterator<Item = usize> + '_> {
     }
 }
 
-// r AND / OR / NOT s; a list that meets a bitset becomes a bitset of all documents.
+// r AND / OR / NOT s without copying a bitset: AND keeps the list side, OR and NOT on a bitset work in
+// place; only list OR bitset copies the bitset.
 fn apply(r: Set, op: u8, s: &Set, words: usize) -> Set {
-    match (r, s) {
-        (Set::List(a), Set::List(c)) => Set::List(match op {
-            b'A' => and(&a, c),
-            b'O' => or(&a, c),
-            _ => not(&a, c),
-        }),
-        (r, s) => {
-            let (mut a, c) = (r.bits(words), s.clone().bits(words));
-            for (x, y) in a.iter_mut().zip(c) {
-                *x = match op {
-                    b'A' => *x & y,
-                    b'O' => *x | y,
-                    _ => *x & !y,
-                };
+    use Set::*;
+    let has = |b: &[u64], x: u32| b[x as usize / 64] >> (x % 64) & 1 != 0;
+    match (op, r, s) {
+        (b'A', List(a), List(c)) => List(and(&a, c)),
+        (b'O', List(a), List(c)) => List(or(&a, c)),
+        (_, List(a), List(c)) => List(not(&a, c)),
+        (b'A', List(a), Bits(c)) => List(a.into_iter().filter(|&x| has(c, x)).collect()),
+        (b'A', Bits(a), List(c)) => List(c.iter().copied().filter(|&x| has(&a, x)).collect()),
+        (b'N', List(a), Bits(c)) => List(a.into_iter().filter(|&x| !has(c, x)).collect()),
+        (_, r, s) => {
+            let mut a = r.bits(words);
+            match s {
+                Bits(c) => a.iter_mut().zip(c).for_each(|(x, &y)| *x = if op == b'A' { *x & y } else if op == b'O' { *x | y } else { *x & !y }),
+                List(c) => c.iter().for_each(|&x| a[x as usize / 64] = if op == b'O' { a[x as usize / 64] | 1 << (x % 64) } else { a[x as usize / 64] & !(1 << (x % 64)) }),
             }
-            Set::Bits(a)
+            Bits(a)
         }
     }
 }
