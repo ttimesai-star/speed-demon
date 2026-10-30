@@ -144,10 +144,13 @@ fn par<T: Send>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
 
 // CSR from edge lists (tail, head, weight) cut by tail range: list k of every part holds the tails in
 // [k * c, (k + 1) * c), c = ceil(n / k_max). Thread k counts, sums and fills its own range.
-fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>]) -> (Vec<u32>, Vec<(u32, u32)>) {
+// adj is a buffer to reuse: its pages are already faulted in, and every slot is written below.
+fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>], mut adj: Vec<(u32, u32)>) -> (Vec<u32>, Vec<(u32, u32)>) {
     let c = n.div_ceil(parts[0].len());
     let sizes: Vec<usize> = (0..parts[0].len()).map(|k| parts.iter().map(|l| l[k].len()).sum()).collect();
-    let (mut off, mut adj) = (vec![0u32; n + 1], vec![(0u32, 0u32); sizes.iter().sum()]);
+    let mut off = vec![0u32; n + 1];
+    (adj.clear(), adj.reserve(sizes.iter().sum()));
+    unsafe { adj.set_len(sizes.iter().sum()) };
     thread::scope(|sc| {
         let (mut rest, mut base) = (&mut adj[..], 0);
         for (k, o) in off[1..].chunks_mut(c).enumerate() {
@@ -197,8 +200,7 @@ fn main() {
         edges(d, bs[t], bs[t + 1], |u, v, w| l[u / c].push((u as u32, v as u32, w)));
         l
     });
-    let (off, adj) = csr(n, &parts);
-    drop(parts);
+    let (off, adj) = csr(n, &parts, vec![]);
     // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
     // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
     let own: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(u32::MAX)).collect();
@@ -265,19 +267,25 @@ fn main() {
             });
         }
     });
-    drop((off, adj));
-    let (off, adj) = (off2, adj2);
-    // Reverse CSR for the backward half of the search, the same way.
-    let parts = par(nt, |t| {
-        let mut l: Vec<Vec<_>> = (0..nt).map(|_| Vec::with_capacity(adj.len() / nt / nt * 9 / 8)).collect();
-        for u in t * n / nt..(t + 1) * n / nt {
-            for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
-                l[v as usize / c].push((v, u as u32, w));
-            }
+    drop(off);
+    let (spare, (off, adj)) = (adj, (off2, adj2));
+    // Reverse CSR for the backward half of the search, the same way, in the forward pass's buckets and edge
+    // array (already faulted in: fresh pages are costly on the box).
+    let mut parts = parts;
+    thread::scope(|sc| {
+        for (t, l) in parts.iter_mut().enumerate() {
+            let (adj, off) = (&adj, &off);
+            sc.spawn(move || {
+                l.iter_mut().for_each(Vec::clear);
+                for u in t * n / nt..(t + 1) * n / nt {
+                    for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
+                        l[v as usize / c].push((v, u as u32, w));
+                    }
+                }
+            });
         }
-        l
     });
-    let (roff, radj) = csr(n, &parts);
+    let (roff, radj) = csr(n, &parts, spare);
     drop((parts, ord));
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
