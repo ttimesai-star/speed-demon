@@ -129,7 +129,7 @@ fn main() {
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     let d = load(&format!("{din}/requests.log"));
-    let nt = thread::available_parallelism().map_or(12, |n| n.get());
+    let nt = 12;
     let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
     for b in &mut bs[1..] {
         while *b > 0 && *b < d.len() && d[*b - 1] != b'\n' {
