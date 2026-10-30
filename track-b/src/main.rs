@@ -266,6 +266,19 @@ fn apply(r: Set, op: u8, s: &Set, words: usize) -> Set {
     }
 }
 
+// A multiplicative hasher for the term map (SipHash was most of the query parse).
+#[derive(Default)]
+struct Fx(u64);
+
+impl std::hash::Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, b: &[u8]) {
+        self.0 = b.iter().fold(self.0, |h, &c| (h.rotate_left(5) ^ c as u64).wrapping_mul(0x517c_c1b7_2722_0a95));
+    }
+}
+
 enum Query {
     Bool(Vec<(u8, u32)>), // (operator byte: b'A', b'O', b'N', or 0 for the first term; term id)
     Phrase(usize), // index into the phrase list
@@ -277,14 +290,14 @@ fn main() {
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     // Queries and the dictionary of their terms.
     let mut terms: Vec<(usize, usize)> = vec![]; // (offset, length) of each distinct term
-    let mut ids: std::collections::HashMap<&[u8], u32> = Default::default();
+    let mut ids: std::collections::HashMap<&[u8], u32, std::hash::BuildHasherDefault<Fx>> = Default::default();
     let mut id_of = |o: usize, n: usize| -> u32 {
         *ids.entry(&q[o..o + n]).or_insert_with(|| (terms.push((o, n)), terms.len() as u32 - 1).1)
     };
-    let (mut qs, mut phr) = (vec![], vec![]);
+    let (mut qs, mut phr, mut words) = (vec![], vec![], vec![]);
     for line in q.split(|&c| c == b'\n').filter(|l| !l.is_empty()) {
         let o = line.as_ptr() as usize - q.as_ptr() as usize;
-        let mut words = vec![];
+        words.clear();
         let mut p = 0;
         for w in line.split(|&c| c == b' ') {
             words.push((o + p, w.len()));
