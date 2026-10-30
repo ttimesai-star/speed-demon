@@ -191,6 +191,7 @@ fn main() {
                 if n <= 32 {
                     v.sort_unstable();
                 } else {
+                    // n >= 25 makes the three ranks distinct, so each select has a non-empty range
                     v.select_nth_unstable(r[2]);
                     v[..r[2]].select_nth_unstable(r[1]);
                     v[..r[1]].select_nth_unstable(r[0]);

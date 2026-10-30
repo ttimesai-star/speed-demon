@@ -24,17 +24,18 @@ Every row passed the seed-1 full hash `495ca096…1cd3` and the seed-1 sample ha
 | 4 | 004e829 | Step 3 with the word-wise compare reverted (slice `==`, glibc `bcmp`): SWAR latency only | — | — | — | A/B: 157.3 ms vs 164.0 ms for step 2 |
 | 5 | 5e8b926 | Hand-written integer formatting instead of `write!`; `sort_unstable` for groups of ≤ 32 instead of three selects; finished hour buffers are handed to whichever thread holds the writer lock, so no thread waits for the hour before it | — | — | — | A/B: 145.4 ms vs 155.4 ms for step 4 (itoa alone: 145.2) |
 | 6 | d2fdcf7 | Latency stored as low 16 bits per line plus high 16 bits only for the ~15 % of lines above 65 535 µs (4.3 instead of 6 bytes per line) | — | — | 19.2 | A/B: 148.2 ms vs 145.4 ms for step 5 (+2 % T, −17 % M: K up ~2.8 %) |
+| 7 | 840f966 | `word()`: one length check and an unaligned load instead of `d.get(p..p + 8)` + `try_into` (the range checks showed up as 6–7 % in `perf`) | — | — | — | A/B: 116.9 ms vs 122.2 ms for step 6 (−4.3 %) |
+| 8 | 5bf7389 | Compact rewrite for S: same algorithm, mmap-only load (the board is Linux), helpers for the SWAR masks, recursive digit printer, one closure per output worker. S 255 → 196 lines after rustfmt | — | 0.146 | 19.4 | CI-harness; A/B: 147.9 vs 147.2 ms for step 7 (neutral) |
+| 9 | 2d1fe2d | One `u32` record per line, `(slot \| 5xx << 12 \| big << 13) << 16 \| latency & 0xFFFF`, instead of two `u16` vectors: one push per line instead of two | — | — | — | A/B: 103.4 vs 106.0 ms for step 8 (−2.5 %) |
 
 ## Measurements that decided the design
 
-- PC phases, v2: parse 17.2 ms, per-hour output phase 10.5 ms (8 threads).
+- PC phases, step 2: parse 17.2 ms, per-hour output phase 10.5 ms (8 threads).
 - Ablation (PC): skipping the endpoint key compare saves ~6 ms of the 17 ms parse; the compare is the
   most expensive step per line. Replacing `memcmp` with word compares saved under 1 ms, so the cost
   is the access to the key bytes, not the call.
 - Ablation (PC): number formatting with `write!` costs ~1 ms, the file write ~0.5 ms; freeing the
   per-hour vectors ~3 ms on Windows (kept: it holds M down while the output grows).
-
-| 7 | 840f966 | `word()`: one length check and an unaligned load instead of `d.get(p..p + 8)` + `try_into` (the range checks showed up as 6–7 % in `perf`) | — | — | — | A/B: 116.9 ms vs 122.2 ms for step 6 (−4.3 %) |
 
 ## Linux `perf` profile (step 6, 2 threads)
 
@@ -72,6 +73,11 @@ Formatting was the largest single piece of "select + format", hence step 5.
 - **Endpoint hash from the length, the first 16 bytes and the last 8**, computed after the scan so the scan
   loop has no multiply chain (exp-hash3; A/B 122.8 vs 116.6 ms, +5 %): more probes and the extra loads cost
   more than the shorter loop saved. Not taken.
+
+- **First compact rewrite** (exp-compact, 9ef8b93; A/B 162.8 vs 148.2 ms, +10 %). Bisected with three
+  variants that each put one old piece back: the culprit was folding the endpoint-scan exit into the loop body
+  with a `checked_shl` mask on every word; the recursive digit printer and indexed high-half reads were neutral.
+  Step 8 is the compact version with the old scan loop.
 
 ## Pending
 
