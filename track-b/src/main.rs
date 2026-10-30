@@ -398,16 +398,14 @@ fn main() {
     // documents for a term that some thread turned into one or that is long, else a list.
     let words = n / 64 + 1;
     let pr = &parts;
-    let sized = par(nt, |c| {
+    let meta = par(nt, |c| {
         (c * nterms / nt..(c + 1) * nterms / nt)
-            .map(|w| {
-                let mut len = 0; // and where each thread starts in the list
-                let st: Vec<u32> = pr.iter().map(|x| (len, len += x.cnt[w]).0).collect();
-                ((len as usize, len as usize * 32 >= n || pr.iter().any(|x| x.bit[w] != NONE)), st)
-            })
+            .map(|w| pr.iter().map(|x| x.cnt[w] as usize).sum::<usize>())
+            .map(|len| (len, len * 32 >= n))
             .collect::<Vec<_>>()
-    });
-    let (meta, starts): (Vec<(usize, bool)>, Vec<Vec<u32>>) = sized.into_iter().flatten().unzip();
+    })
+    .concat();
+    let meta: Vec<(usize, bool)> = meta.iter().enumerate().map(|(w, &(l, b))| (l, b || pr.iter().any(|x| x.bit[w] != NONE))).collect();
     // All lists in one zeroed buffer: one mapping, whose pages are touched only as the layout writes them.
     let mut off = vec![0usize; nterms + 1];
     for w in 0..nterms {
@@ -417,9 +415,10 @@ fn main() {
     let mut bits: Vec<Vec<u64>> = meta.iter().map(|m| if m.1 { vec![0; words] } else { vec![] }).collect();
     let ptrs: Vec<usize> = (0..nterms).map(|w| match meta[w].1 { true => bits[w].as_mut_ptr() as usize, false => buf.as_mut_ptr().wrapping_add(off[w]) as usize }).collect();
     let big: Vec<bool> = meta.iter().map(|m| m.1).collect();
-    let (ptrs, big, starts) = (&ptrs, &big, &starts);
+    let (ptrs, big) = (&ptrs, &big);
     par(nt, |t| {
-        let (x, mut cur) = (&pr[t], starts.iter().map(|s| s[t]).collect::<Vec<u32>>());
+        // where this thread starts in each list: the documents of the threads before it
+        let (x, mut cur) = (&pr[t], (0..nterms).map(|w| pr[..t].iter().map(|y| y.cnt[w]).sum()).collect::<Vec<u32>>());
         let set = |w: usize, i: usize| unsafe { (*((ptrs[w] as *const AtomicU64).add(i / 64))).fetch_or(1 << (i % 64), Relaxed) };
         let mut e = 0;
         for (k, &end) in x.ends.iter().enumerate() {
