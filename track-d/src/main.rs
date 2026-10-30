@@ -133,6 +133,47 @@ fn wide(off: &[u32], adj: &[(u32, u32)], s: usize, t: usize) -> u64 {
     u64::MAX
 }
 
+// Runs f(0..nt) on nt threads and returns the results in thread order.
+fn par<T: Send>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    thread::scope(|sc| {
+        let hs: Vec<_> = (0..nt).map(|t| sc.spawn({ let f = &f; move || f(t) })).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+// CSR from edge lists (tail, head, weight) cut by tail range: list k of every part holds the tails in
+// [k * c, (k + 1) * c), c = ceil(n / k_max). Thread k counts, sums and fills its own range.
+fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>]) -> (Vec<u32>, Vec<(u32, u32)>) {
+    let c = n.div_ceil(parts[0].len());
+    let sizes: Vec<usize> = (0..parts[0].len()).map(|k| parts.iter().map(|l| l[k].len()).sum()).collect();
+    let (mut off, mut adj) = (vec![0u32; n + 1], vec![(0u32, 0u32); sizes.iter().sum()]);
+    thread::scope(|sc| {
+        let (mut rest, mut base) = (&mut adj[..], 0);
+        for (k, o) in off[1..].chunks_mut(c).enumerate() {
+            let (a, r) = std::mem::take(&mut rest).split_at_mut(sizes[k]);
+            rest = r;
+            sc.spawn(move || {
+                for &(u, _, _) in parts.iter().flat_map(|l| &l[k]) {
+                    o[u as usize - k * c] += 1;
+                }
+                let mut s = base as u32;
+                for x in o.iter_mut() {
+                    (s += *x, *x = s); // end of each node
+                }
+                for &(u, v, w) in parts.iter().flat_map(|l| &l[k]) {
+                    let j = &mut o[u as usize - k * c];
+                    *j -= 1; // ends up at the node's start
+                    a[*j as usize - base] = (v, w);
+                }
+            });
+            base += sizes[k];
+        }
+    });
+    off.copy_within(1.., 0); // off[x + 1] held the start of x
+    off[n] = adj.len() as u32;
+    (off, adj)
+}
+
 fn main() {
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
@@ -147,40 +188,16 @@ fn main() {
         }
     }
     bs.push(d.len());
-    // CSR in two parallel passes: out-degrees (and in-degrees), then edges placed by atomic cursors.
-    let deg: Vec<AtomicU32> = (0..n + 1).map(|_| AtomicU32::new(0)).collect();
-    let ind: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
+    // Edges cut by tail range per thread, then a CSR built range by range: no atomic in either pass.
+    let c = n.div_ceil(nt);
     let bs = &bs;
-    thread::scope(|sc| {
-        for t in 0..nt {
-            let (deg, ind) = (&deg, &ind);
-            sc.spawn(move || {
-                edges(d, bs[t], bs[t + 1], |u, v, _| {
-                    deg[u + 1].fetch_add(1, Relaxed);
-                    ind[v].fetch_add(1, Relaxed);
-                })
-            });
-        }
+    let parts = par(nt, |t| {
+        let mut l: Vec<Vec<_>> = (0..nt).map(|_| Vec::with_capacity((bs[t + 1] - bs[t]) / 16 / nt)).collect();
+        edges(d, bs[t], bs[t + 1], |u, v, w| l[u / c].push((u as u32, v as u32, w)));
+        l
     });
-    let mut off: Vec<u32> = deg.into_iter().map(|x| x.into_inner()).collect();
-    for i in 0..n {
-        off[i + 1] += off[i];
-    }
-    let cur: Vec<AtomicU32> = off[..n].iter().map(|&x| AtomicU32::new(x)).collect();
-    let mut adj: Vec<(u32, u32)> = vec![(0, 0); off[n] as usize];
-    let ap = adj.as_mut_ptr() as usize;
-    thread::scope(|sc| {
-        for t in 0..nt {
-            let cur = &cur;
-            sc.spawn(move || {
-                edges(d, bs[t], bs[t + 1], |u, v, w| {
-                    let i = cur[u].fetch_add(1, Relaxed) as usize;
-                    unsafe { *(ap as *mut (u32, u32)).add(i) = (v as u32, w) };
-                })
-            });
-        }
-    });
-    drop(cur);
+    let (off, adj) = csr(n, &parts);
+    drop(parts);
     // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
     // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
     let own: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(u32::MAX)).collect();
@@ -202,18 +219,10 @@ fn main() {
             }
         }
     };
-    let mut lists: Vec<Vec<u32>> = thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt)
-            .map(|t| {
-                let bfs = &bfs;
-                sc.spawn(move || {
-                    let mut q = Vec::with_capacity(2 * n / nt);
-                    bfs(t * n / nt, t as u32, &mut q);
-                    q
-                })
-            })
-            .collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    let mut lists = par(nt, |t| {
+        let mut q = Vec::with_capacity(2 * n / nt);
+        bfs(t * n / nt, t as u32, &mut q);
+        q
     });
     let mut rest = vec![];
     for r in 0..n {
@@ -248,28 +257,18 @@ fn main() {
     });
     drop((off, adj));
     let (off, adj) = (off2, adj2);
-    // Reverse CSR for the backward half of the search.
-    let mut roff = vec![0u32; n + 1];
-    for i in 0..n {
-        roff[i + 1] = roff[i] + ind[ord[i] as usize].load(Relaxed);
-    }
-    let rcur: Vec<AtomicU32> = roff[..n].iter().map(|&x| AtomicU32::new(x)).collect();
-    let mut radj: Vec<(u32, u32)> = vec![(0, 0); adj.len()];
-    let rp = radj.as_mut_ptr() as usize;
-    thread::scope(|sc| {
-        for t in 0..nt {
-            let (rcur, off, adj) = (&rcur, &off, &adj);
-            sc.spawn(move || {
-                for u in t * n / nt..(t + 1) * n / nt {
-                    for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
-                        let i = rcur[v as usize].fetch_add(1, Relaxed) as usize;
-                        unsafe { *(rp as *mut (u32, u32)).add(i) = (u as u32, w) };
-                    }
-                }
-            });
+    // Reverse CSR for the backward half of the search, the same way.
+    let parts = par(nt, |t| {
+        let mut l: Vec<Vec<_>> = (0..nt).map(|_| Vec::with_capacity(adj.len() / nt / nt * 9 / 8)).collect();
+        for u in t * n / nt..(t + 1) * n / nt {
+            for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
+                l[v as usize / c].push((v, u as u32, w));
+            }
         }
+        l
     });
-    drop((rcur, ord, ind));
+    let (roff, radj) = csr(n, &parts);
+    drop((parts, ord));
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
     while p < q.len() {
