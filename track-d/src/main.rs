@@ -242,7 +242,7 @@ fn main() {
     let d = load(&format!("{din}/graph.txt"));
     let mut p = 0;
     let (n, _m) = (num(d, &mut p) as usize, num(d, &mut p));
-    let nt = thread::available_parallelism().map_or(12, |n| n.get());
+    let nt = 12;
     let mut bs: Vec<usize> = (0..nt).map(|k| p + k * (d.len() - p) / nt).collect();
     for b in &mut bs[1..] {
         while d[*b - 1] != b'\n' {
