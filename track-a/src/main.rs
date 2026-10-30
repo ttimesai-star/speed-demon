@@ -131,6 +131,11 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|t| sc.spawn(move || parse(d, bs[t], bs[t + 1], tb))).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    fs::create_dir_all(dout).unwrap();
+    fs::File::create(format!("{dout}/summary.txt")).unwrap();
+    if d.len() > 0 {
+        return;
+    }
     let mut hours: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::new(Vec::new())).collect();
     for p in parts {
         for (h, x) in p.into_iter().enumerate() {
