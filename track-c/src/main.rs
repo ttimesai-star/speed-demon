@@ -1,6 +1,6 @@
 // Speed Demon 2026, track C (Join). Spec: specs/c-join.md in hackathon-raptors/speed-demon-2026.
 use std::io::Write;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 use std::{env, fs, thread};
 
 #[cfg(unix)]
@@ -24,7 +24,7 @@ fn load(path: &str) -> &'static [u8] {
     fs::read(path).unwrap().leak()
 }
 
-const SLOTS: usize = 1 << 19; // name table; the generator's pool has 100,000 names
+const SLOTS: usize = 1 << 19; // name table; the generator's pool has 100,000 names (ids < 2^20)
 const IDS: usize = 1 << 20; // bits per country bitset, only the touched pages cost memory
 
 // Zeroed atomics from calloc'd memory, so untouched pages are never faulted in.
@@ -43,17 +43,40 @@ fn num(d: &[u8], p: &mut usize) -> u64 {
     x
 }
 
+// Eight bytes at d[p..], little-endian, zero-padded past the end of d.
+fn word(d: &[u8], p: usize) -> u64 {
+    if p + 8 <= d.len() {
+        return u64::from_le(unsafe { (d.as_ptr().add(p) as *const u64).read_unaligned() });
+    }
+    let mut b = [0u8; 8];
+    b[..d.len() - p].copy_from_slice(&d[p..]);
+    u64::from_le_bytes(b)
+}
+
+// Offset of the first byte c in d[p..], eight bytes at a time (exact zero-byte test).
+fn find(d: &[u8], mut p: usize, c: u8) -> usize {
+    loop {
+        let x = word(d, p) ^ c as u64 * 0x0101_0101_0101_0101;
+        let z = !(((x & 0x7F7F_7F7F_7F7F_7F7F) + 0x7F7F_7F7F_7F7F_7F7F) | x) & 0x8080_8080_8080_8080;
+        if z != 0 {
+            return p + z.trailing_zeros() as usize / 8;
+        }
+        p += 8;
+    }
+}
+
 // Parses one text field at d[*p..] and steps over it and the comma after it: (raw start, raw length,
 // number of "" pairs). For a quoted field the raw bytes are those between the delimiting quotes.
 fn field(d: &[u8], p: &mut usize) -> (usize, usize, usize) {
     let (s, mut q, mut pairs) = (*p + 1, *p + 1, 0);
     if d[*p] != b'"' {
-        let n = d[*p..].iter().position(|&c| c == b',').unwrap();
-        *p += n + 1;
-        return (*p - n - 1, n, 0);
+        let e = find(d, *p, b',');
+        let r = (*p, e - *p, 0);
+        *p = e + 1;
+        return r;
     }
     loop {
-        q += d[q..].iter().position(|&c| c == b'"').unwrap();
+        q = find(d, q, b'"');
         if d[q + 1] != b'"' {
             *p = q + 2;
             return (s, q - s, pairs);
@@ -62,35 +85,38 @@ fn field(d: &[u8], p: &mut usize) -> (usize, usize, usize) {
     }
 }
 
-// Dense id of the raw name d[s..s+n], shared by all threads (key: offset << 16 | length, 0 = empty slot).
-fn name_id(tab: &[AtomicU64], ids: &[AtomicU32], next: &AtomicU32, d: &[u8], s: usize, n: usize) -> u32 {
-    let key = &d[s..s + n];
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
-    for &c in key {
-        h = (h ^ c as u64).wrapping_mul(0x100_0000_01b3);
+// Dense id of the raw name d[s..s+n], shared by all threads. A new name is copied to the arena first,
+// then published by CAS as arena offset << 36 | length << 20 | id (bit 63 set, 0 = empty slot).
+fn name_id(tab: &[AtomicU64], arena: &[AtomicU64], top: &AtomicU64, d: &[u8], s: usize, n: usize) -> u64 {
+    let mut h = n as u64;
+    for k in (0..n).step_by(8) {
+        let w = word(d, s + k) & u64::MAX >> 8 * (8 - (n - k).min(8)) as u32 % 64;
+        h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
     let mut i = (h >> 40) as usize & (SLOTS - 1);
     loop {
-        let mut v = tab[i].load(Relaxed);
+        let mut v = tab[i].load(Acquire);
         if v == 0 {
-            match tab[i].compare_exchange(0, (s as u64) << 16 | n as u64 | 1 << 63, Relaxed, Relaxed) {
-                Ok(_) => {
-                    let id = next.fetch_add(1, Relaxed) + 1;
-                    ids[i].store(id, Relaxed);
-                    return id;
-                }
+            let words = n.div_ceil(8) as u64;
+            let o = top.fetch_add(words << 20 | 1, Relaxed); // arena words << 20 | ids
+            let (at, id) = ((o >> 20) as usize, (o & 0xFFFFF) + 1);
+            for k in 0..words as usize {
+                let w = word(d, s + 8 * k) & u64::MAX >> 8 * (8 - (n - 8 * k).min(8)) as u32 % 64;
+                arena[at + k].store(w, Relaxed);
+            }
+            let key = 1 << 63 | (at as u64) << 36 | (n as u64) << 20 | id;
+            match tab[i].compare_exchange(0, key, Release, Acquire) {
+                Ok(_) => return id,
                 Err(w) => v = w,
             }
         }
-        let (o, l) = ((v >> 16 & (1 << 47) - 1) as usize, (v & 0xFFFF) as usize);
-        if l == n && d[o..o + l] == *key {
-            loop {
-                let id = ids[i].load(Relaxed);
-                if id != 0 {
-                    return id; // the inserting thread may not have stored it yet
-                }
-                std::hint::spin_loop();
-            }
+        let (at, l) = ((v >> 36 & 0x7FF_FFFF) as usize, (v >> 20 & 0xFFFF) as usize);
+        if l == n
+            && (0..n.div_ceil(8)).all(|k| {
+                arena[at + k].load(Relaxed) == word(d, s + 8 * k) & u64::MAX >> 8 * (8 - (n - 8 * k).min(8)) as u32 % 64
+            })
+        {
+            return v & 0xFFFFF;
         }
         i = (i + 1) & (SLOTS - 1);
     }
@@ -129,9 +155,10 @@ fn main() {
     let mut codes: Vec<[u8; 3]> = rows.iter().map(|x| x.1).collect();
     (codes.sort_unstable(), codes.dedup());
     let nc = codes.len(); // index nc is _UNMATCHED
-    let mut country = vec![nc as u16; rows.iter().map(|x| x.0).max().unwrap_or(0) + 1];
+    assert!(nc < 256);
+    let mut country = vec![nc as u8; rows.iter().map(|x| x.0).max().unwrap_or(0) + 1];
     for (id, c) in &rows {
-        country[*id] = codes.binary_search(c).unwrap() as u16;
+        country[*id] = codes.binary_search(c).unwrap() as u8;
     }
     let d = load(&format!("{din}/records.csv"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
@@ -159,11 +186,9 @@ fn main() {
         bs.push((q + 1).min(d.len()).max(bs[k - 1]));
     }
     bs.push(d.len());
-    let tab = zeroed(SLOTS);
-    let ids: Vec<AtomicU32> = (0..SLOTS).map(|_| AtomicU32::new(0)).collect();
-    let next = AtomicU32::new(0);
+    let (tab, arena, top) = (zeroed(SLOTS), zeroed(1 << 24), AtomicU64::new(0));
     let seen = zeroed((nc + 1) * IDS / 64);
-    let (bs, country, ids, next) = (&bs, &country, &ids, &next);
+    let (bs, country, top) = (&bs, &country, &top);
     let parts: Vec<Vec<Agg>> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
@@ -187,12 +212,12 @@ fn main() {
                         p += 3;
                         p += if d[p] == b'\r' { 2 } else { 1 };
                         let amt = if neg { -(whole * 100 + cents) } else { whole * 100 + cents };
-                        let g = *country.get(reg).unwrap_or(&(nc as u16)) as usize;
+                        let g = *country.get(reg).unwrap_or(&(nc as u8)) as usize;
                         let a = &mut agg[g];
                         (a.count += 1, a.ids += id, a.sum += amt);
                         (a.min = a.min.min(amt), a.max = a.max.max(amt));
                         (a.name_bytes += (nn - np) as i64, a.note_bytes += (tn - tp) as i64);
-                        let nid = if nn == 0 { 0 } else { name_id(tab, ids, next, d, ns, nn) } as usize;
+                        let nid = if nn == 0 { 0 } else { name_id(tab, arena, top, d, ns, nn) } as usize;
                         let w = &seen[g * IDS / 64 + nid / 64];
                         if w.load(Relaxed) & 1 << (nid % 64) == 0 {
                             w.fetch_or(1 << (nid % 64), Relaxed);
@@ -204,7 +229,7 @@ fn main() {
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    assert!((next.load(Relaxed) as usize) < IDS);
+    assert!(((top.load(Relaxed) & 0xFFFFF) as usize) < IDS && (top.load(Relaxed) >> 20) < 1 << 24);
     let mut out = Vec::new();
     for g in 0..=nc {
         let mut a = ZERO;
