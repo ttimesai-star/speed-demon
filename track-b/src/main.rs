@@ -87,12 +87,21 @@ fn tokens(dict: &Dict, text: &[u8], mut f: impl FnMut(u32)) {
     }
 }
 
+// First index i >= j with b[i] >= x, galloping from j (b sorted).
+fn seek(b: &[u32], mut j: usize, x: u32) -> usize {
+    let mut step = 1;
+    while j + step < b.len() && b[j + step] < x {
+        (j, step) = (j + step, step * 2);
+    }
+    let hi = (j + step).min(b.len());
+    j + b[j.min(hi)..hi].partition_point(|&y| y < x)
+}
+
 fn and(a: &[u32], b: &[u32]) -> Vec<u32> {
-    let (mut r, mut j) = (Vec::with_capacity(a.len().min(b.len())), 0);
+    let (a, b) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let (mut r, mut j) = (Vec::with_capacity(a.len()), 0);
     for &x in a {
-        while j < b.len() && b[j] < x {
-            j += 1;
-        }
+        j = seek(b, j, x);
         if j < b.len() && b[j] == x {
             r.push(x);
         }
@@ -115,9 +124,7 @@ fn or(a: &[u32], b: &[u32]) -> Vec<u32> {
 fn not(a: &[u32], b: &[u32]) -> Vec<u32> {
     let (mut r, mut j) = (Vec::with_capacity(a.len()), 0);
     for &x in a {
-        while j < b.len() && b[j] < x {
-            j += 1;
-        }
+        j = seek(b, j, x);
         if j == b.len() || b[j] != x {
             r.push(x);
         }
