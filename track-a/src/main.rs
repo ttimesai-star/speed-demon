@@ -88,13 +88,14 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
         loop {
             let w = word(d, p);
             let z = eq_bytes(w, b' ' as u64);
-            let k = z.trailing_zeros() as usize / 8;
-            h = (h ^ w & !(!0u64).checked_shl(8 * k as u32).unwrap_or(0) ^ (p + k - s) as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            p += k.min(8);
             if z != 0 {
+                let k = z.trailing_zeros() as usize / 8;
+                h = (h ^ (w & ((1u64 << (8 * k)) - 1)) ^ (p + k - s) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                p += k;
                 break;
             }
+            h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            p += 8;
         }
         let sl = slot(tab, d, s, p - s, h) as u16 | ((d[p + 1] == b'5') as u16) << 12;
         let w = word(d, p + 5);
@@ -163,11 +164,12 @@ fn main() {
             let mut cur = cnt.clone();
             lat.resize(cnt[SLOTS] as usize, 0);
             for r in &recs {
-                let mut j = 0;
+                let mut hi = r.2.iter();
                 for (&lo, &m) in r.0.iter().zip(&r.1) {
-                    let (g, big) = ((m & 4095) as usize, m >> 13 != 0);
-                    lat[cur[g] as usize] = lo as u32 | (if big { r.2[j] } else { 0 } as u32) << 16;
-                    (cur[g] += 1, j += big as usize);
+                    let v = lo as u32 | if m >> 13 != 0 { (*hi.next().unwrap() as u32) << 16 } else { 0 };
+                    let g = (m & 4095) as usize;
+                    lat[cur[g] as usize] = v;
+                    cur[g] += 1;
                 }
             }
             drop(recs);
@@ -194,8 +196,16 @@ fn main() {
                 buf.extend_from_slice(ep(s));
                 let (e, q) = (errs[s], r.map(|k| v[k] as usize));
                 for x in [n, q[0], q[1], q[2], e, e * 1_000_000 / n] {
-                    buf.push(b' ');
-                    put(&mut buf, x);
+                    let (mut t, mut i, mut x) = ([b' '; 21], 21, x);
+                    loop {
+                        i -= 1;
+                        t[i] = b'0' + (x % 10) as u8;
+                        x /= 10;
+                        if x == 0 {
+                            break;
+                        }
+                    }
+                    buf.extend_from_slice(&t[i - 1..]);
                 }
                 buf.push(b'\n');
             }
