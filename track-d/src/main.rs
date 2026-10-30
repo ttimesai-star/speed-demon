@@ -192,6 +192,50 @@ fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>]) -> (Vec<u32>, Vec<(u32, u3
     (off, adj)
 }
 
+// Reverse CSR without a copy of the edges: thread k scans every edge twice (count, then fill) and keeps
+// the heads in its range [k * c, (k + 1) * c).
+fn rev(n: usize, nt: usize, off: &[u32], adj: &[(u32, u32)]) -> (Vec<u32>, Vec<(u32, u32)>) {
+    let c = n.div_ceil(nt);
+    let mut roff = vec![0u32; n + 1];
+    fn scan(n: usize, c: usize, k: usize, off: &[u32], adj: &[(u32, u32)], mut f: impl FnMut(usize, usize, u32)) {
+        for u in 0..n {
+            for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
+                if v as usize / c == k {
+                    f(v as usize - k * c, u, w);
+                }
+            }
+        }
+    }
+    thread::scope(|sc| {
+        for (k, o) in roff[1..].chunks_mut(c).enumerate() {
+            sc.spawn(move || scan(n, c, k, off, adj, |i, _, _| o[i] += 1));
+        }
+    });
+    let sizes: Vec<usize> = roff[1..].chunks(c).map(|o| o.iter().map(|&x| x as usize).sum()).collect();
+    let mut radj = vec![(0u32, 0u32); adj.len()];
+    thread::scope(|sc| {
+        let (mut rest, mut base) = (&mut radj[..], 0);
+        for (k, o) in roff[1..].chunks_mut(c).enumerate() {
+            let (a, r) = std::mem::take(&mut rest).split_at_mut(sizes[k]);
+            rest = r;
+            sc.spawn(move || {
+                let mut s = base as u32;
+                for x in o.iter_mut() {
+                    (s += *x, *x = s);
+                }
+                scan(n, c, k, off, adj, |i, u, w| {
+                    o[i] -= 1;
+                    a[o[i] as usize - base] = (u as u32, w);
+                });
+            });
+            base += sizes[k];
+        }
+    });
+    roff.copy_within(1.., 0);
+    roff[n] = adj.len() as u32;
+    (roff, radj)
+}
+
 fn main() {
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
@@ -275,18 +319,8 @@ fn main() {
     });
     drop((off, adj));
     let (off, adj) = (off2, adj2);
-    // Reverse CSR for the backward half of the search, the same way.
-    let parts = par(nt, |t| {
-        let mut l: Vec<Vec<_>> = (0..nt).map(|_| Vec::with_capacity(adj.len() / nt / nt * 9 / 8)).collect();
-        for u in t * n / nt..(t + 1) * n / nt {
-            for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
-                l[v as usize / c].push((v, u as u32, w));
-            }
-        }
-        l
-    });
-    let (roff, radj) = csr(n, &parts);
-    drop((parts, ord));
+    let (roff, radj) = rev(n, nt, &off, &adj);
+    drop(ord);
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
     while p < q.len() {
