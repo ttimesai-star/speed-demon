@@ -111,9 +111,11 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
 }
 
 fn main() {
+    let st = std::time::Instant::now();
     let args: Vec<String> = env::args().collect();
     let (din, dout) = (args.get(1).map_or("/data", |s| s), args.get(2).map_or("/out", |s| s));
     let d = load(&format!("{din}/requests.log"));
+    eprintln!("load {:?}", st.elapsed());
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
     let cut = |k: usize| match k * d.len() / nt {
         x if k == nt => x,
@@ -126,6 +128,7 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|t| sc.spawn(move || parse(d, bs[t], bs[t + 1], tb))).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    eprintln!("parse {:?}", st.elapsed());
     let mut hours: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::new(Vec::new())).collect();
     for p in parts {
         for (h, x) in p.into_iter().enumerate() {
@@ -138,6 +141,7 @@ fn main() {
     };
     let mut order: Vec<usize> = (0..SLOTS).filter(|&s| tab[s].load(Relaxed) != 0).collect();
     order.sort_by_key(|&s| ep(s));
+    eprintln!("regroup {:?}", st.elapsed());
     fs::create_dir_all(dout).unwrap();
     let f = fs::File::create(format!("{dout}/summary.txt")).unwrap();
     let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
