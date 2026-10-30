@@ -1,0 +1,37 @@
+# perf stat + perf record of one commit of one track (native, seed 1 full). Tooling, not counted in S.
+name: sd-perf
+on:
+  workflow_dispatch:
+    inputs:
+      ref: { required: true }
+      track: { default: "a" }
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/checkout@v4
+        with: { repository: hackathon-raptors/speed-demon-2026, path: sd2026 }
+      - uses: actions/cache@v4
+        with:
+          path: data
+          key: sd-data-${{ inputs.track }}-${{ hashFiles('sd2026/generators/**') }}
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - name: data + build + perf
+        run: |
+          t=${{ inputs.track }}
+          g=$(ls sd2026/generators/${t}_*.py)
+          [ -d data/full/$t ] || python3 "$g" --seed 1 --scale full --out data/full/$t
+          git worktree add -f /tmp/wt ${{ inputs.ref }}
+          (cd /tmp/wt/track-$t && CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release -q)
+          sudo apt-get install -y -qq linux-tools-common linux-tools-$(uname -r) >/dev/null 2>&1 || sudo apt-get install -y -qq linux-tools-generic >/dev/null 2>&1
+          P=$(ls /usr/lib/linux-tools/*/perf | head -1); echo "perf=$P"
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          B=/tmp/wt/track-$t/target/release/solution; mkdir -p /tmp/o
+          for i in 1 2 3; do $B data/full/$t /tmp/o; done
+          $P stat -e task-clock,page-faults,cycles,instructions,branches,branch-misses,cache-misses,dTLB-load-misses -r 5 $B data/full/$t /tmp/o 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          $P record -F 20000 -g -o /tmp/perf.data $B data/full/$t /tmp/o 2>/dev/null
+          $P report -i /tmp/perf.data --stdio --no-children --sort sym 2>/dev/null | grep -v "^$" | head -60
+          $P report -i /tmp/perf.data --stdio --no-children --sort srcline 2>/dev/null | grep -E "^ +[0-9]" | head -60
