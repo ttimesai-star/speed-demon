@@ -140,19 +140,21 @@ fn main() {
     order.sort_by_key(|&s| ep(s));
     fs::create_dir_all(dout).unwrap();
     let f = fs::File::create(format!("{dout}/summary.txt")).unwrap();
-    let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let next = AtomicUsize::new(0);
+    let ready = Mutex::new((0, vec![None; HOURS])); // next hour to write, finished buffers
     thread::scope(|sc| {
         for _ in 0..nt {
             sc.spawn(|| {
                 let (mut cnt, mut errs, mut cur) = (vec![0u32; SLOTS + 1], vec![0u32; SLOTS], vec![0u32; SLOTS]);
-                let (mut lat, mut buf) = (Vec::new(), Vec::new());
+                let mut lat = Vec::new();
                 loop {
                     let h = next.fetch_add(1, Relaxed);
                     if h >= HOURS {
                         break;
                     }
                     let recs = std::mem::take(&mut *hours[h].lock().unwrap());
-                    (cnt.fill(0), errs.fill(0), buf.clear());
+                    let mut buf = Vec::new();
+                    (cnt.fill(0), errs.fill(0));
                     for &m in recs.iter().flat_map(|r| &r.1) {
                         cnt[(m & 4095) as usize + 1] += 1;
                         errs[(m & 4095) as usize] += (m >> 12) as u32;
@@ -203,11 +205,13 @@ fn main() {
                         }
                         buf.push(b'\n');
                     }
-                    while done.load(Acquire) != h {
-                        thread::yield_now();
+                    let mut g = ready.lock().unwrap();
+                    let (done, bufs) = &mut *g;
+                    bufs[h] = Some(buf);
+                    while let Some(b) = bufs.get_mut(*done).and_then(Option::take) {
+                        (&f).write_all(&b).unwrap();
+                        *done += 1;
                     }
-                    (&f).write_all(&buf).unwrap();
-                    done.store(h + 1, Release);
                 }
             });
         }
