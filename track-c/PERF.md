@@ -15,6 +15,8 @@ Every step from the reference to your final version, each with the live-board ru
 | 7 | Ablation on the PC: without the name lookup the parse is 13 ms faster (a third of it), without the country lookup no faster. Two-stage pipeline: each record's name slot is prefetched and the previous record's name is resolved and marked. PC 76.8 → 74.6 ms (commit fb752f6, pushed as 7dc1c88) | run-1c1fd2c854ad | 0.0669 | 17.7 | 68.23 |
 | 8 | Three-stage pipeline: the name's id, then a prefetch of its word in the country bitset, the bit set one record later (PC 74.6 → 71.5 ms); `regions.csv` mapped and read in two passes instead of a 3.2 MB list of rows plus a 2.2 MB copy of the file (commits 22aea26, ee7955a) | run-16bc02fcc2c1 | 0.0626 | 12.1 | 70.45 |
 | 9 | Prefetch of the country entry right after the region id is parsed, used after the amount (commit fc68bc4, pushed as eb74b43) | run-7d802fb0711b | 0.0624 | 11.9 | 70.56 |
+| 10 | S: unix-only `load` (commit 1309be5) | run-8151737f38dd | 0.0625 | 12.5 | 70.36 |
+| 11 | Byte search for `"` and `,` 32 bytes at a time with AVX2, SWAR for the tail. PC 71.5 → 69.8 ms | | | | |
 
 ## Correctness checks
 

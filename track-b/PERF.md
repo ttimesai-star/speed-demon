@@ -14,6 +14,8 @@ Every step from the reference to your final version, each with the live-board ru
 | 7 | Phrase checks measured on the PC: with them switched off the corpus pass is 211 ms instead of 270 ms. The trigger was the longest term, often a common word. Now a parallel pre-pass counts documents per term on the first 1/64 of every chunk, and the trigger is the rarest term by that count, then the longest. PC 348 → 293 ms (−16 %) (commit a1f4092, pushed as 7dc1c88) | run-a9d10c49aa96 | 0.4947 | 179.6 | 56.71 |
 | 8 | Sizes and per-thread offsets of the final sets in parallel by term range; BOOL without bitset copies: AND with a list keeps the list side, OR and NOT on a bitset work in place, only list OR bitset copies (the four-arm version cloned a 31 KB bitset per operation) (commits 501e54c, 3931f5e) | run-207db152c61e | 0.4796 | 184.6 | 56.88 |
 | 9 | Tokenizer one token ahead: the next token is found and hashed and its dictionary slot prefetched before the current one is resolved. PC 287 → 270 ms (commit 2437d05, pushed as eb74b43) | run-7ab17109b510 | 0.4611 | 184.0 | 57.21 |
+| 10 | S: unix-only `load` (the PC build swaps in its own), a shorter `par()`; plus a `malloc_trim(0)` before the answers as a test of whether the peak is freed prep memory kept by malloc: M 184.8 MB, unchanged, so it is not (commit 1309be5; the trim is removed again in step 11) | run-9bd4481a6298 | 0.445 | 184.8 | 57.61 |
+| 11 | Byte search 32 bytes at a time with AVX2 (x86-64-v3) for each document's TAB and LF; a multiplicative hasher for the term map and one word buffer for all query lines (the query parse is serial). PC 270 → 264 ms | | | | |
 
 ## Correctness checks
 
