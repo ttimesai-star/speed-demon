@@ -231,13 +231,15 @@ fn main() {
         }
         (lists, runs, docs)
     });
-    let mut lists: Vec<Vec<u32>> = vec![vec![]; nterms];
+    // Thread lists concatenated in thread order (so sorted), term ranges in parallel.
+    let lists: Vec<Vec<u32>> = par(nt, |t| {
+        let r = t * nterms / nt..(t + 1) * nterms / nt;
+        r.map(|w| parts.iter().flat_map(|p| p.0[w].iter().copied()).collect::<Vec<u32>>()).collect::<Vec<_>>()
+    })
+    .concat();
     let mut runs: Vec<Vec<(u32, u32)>> = vec![vec![]; nrep as usize];
     let mut docs = vec![];
-    for (l, r, dd) in parts {
-        for (a, b) in lists.iter_mut().zip(l) {
-            if a.is_empty() { *a = b } else { a.extend_from_slice(&b) }
-        }
+    for (_, r, dd) in parts {
         for (a, b) in runs.iter_mut().zip(r) {
             a.extend_from_slice(&b);
         }
