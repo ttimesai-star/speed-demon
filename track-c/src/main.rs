@@ -156,15 +156,18 @@ fn main() {
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     // regions.csv: region id -> country index, countries in byte order. A code is a base-26 number, so the
-    // order of the numbers is the byte order and a 26^3 table replaces a sort.
-    let r = fs::read(format!("{din}/regions.csv")).unwrap();
-    let (mut rows, mut idx) = (vec![], vec![u16::MAX; 26 * 26 * 26]);
-    let mut p = r.iter().position(|&c| c == b'\n').unwrap() + 1;
-    while p < r.len() {
-        let id = num(&r, &mut p) as usize;
-        let key = r[p + 1..p + 4].iter().fold(0, |k, &c| k * 26 + (c - b'A') as usize);
-        (rows.push((id, key)), idx[key] = 0, p += 5);
-    }
+    // order of the numbers is the byte order and a 26^3 table replaces a sort. Two passes over the mapped
+    // file instead of a list of rows.
+    let r = load(&format!("{din}/regions.csv"));
+    let rows = |f: &mut dyn FnMut(usize, usize)| {
+        let mut p = r.iter().position(|&c| c == b'\n').unwrap() + 1;
+        while p < r.len() {
+            let id = num(r, &mut p) as usize;
+            (f(id, r[p + 1..p + 4].iter().fold(0, |k, &c| k * 26 + (c - b'A') as usize)), p += 5);
+        }
+    };
+    let (mut idx, mut top) = (vec![u16::MAX; 26 * 26 * 26], 0);
+    rows(&mut |id, key| (idx[key] = 0, top = top.max(id)).1);
     let mut codes = vec![];
     for key in 0..idx.len() {
         if idx[key] == 0 {
@@ -173,10 +176,8 @@ fn main() {
     }
     let nc = codes.len(); // index nc is _UNMATCHED
     assert!(nc < 256);
-    let mut country = vec![nc as u8; rows.iter().map(|x| x.0).max().unwrap_or(0) + 1];
-    for &(id, key) in &rows {
-        country[id] = idx[key] as u8;
-    }
+    let mut country = vec![nc as u8; top + 1];
+    rows(&mut |id, key| country[id] = idx[key] as u8);
     let d = load(&format!("{din}/records.csv"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
     // Chunk starts without a pass over the file: by section 2.2 a note is lowercase words (an LF in it is
