@@ -59,8 +59,7 @@ fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
             }
         }
         let (vs, vn) = ((v >> 8) as usize, (v & 255) as usize);
-        let same = |j: usize| (word(d, vs + j) ^ word(d, s + j)) << (8 * 8usize.saturating_sub(n - j)) == 0;
-        if vn == n && (0..n).step_by(8).all(same) {
+        if vn == n && d[vs..vs + n] == d[s..s + n] {
             return i;
         }
         i = (i + 1) & (SLOTS - 1);
