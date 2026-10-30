@@ -1,6 +1,6 @@
 // Speed Demon 2026, track D (Traverse). Spec: specs/d-traverse.md in hackathon-raptors/speed-demon-2026.
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::{env, fs, thread};
@@ -44,6 +44,26 @@ fn edges(d: &[u8], a: usize, b: usize, mut f: impl FnMut(usize, usize, u32)) {
             f(u as usize, v as usize, w as u32);
         }
     }
+}
+
+// The same search with u64 distances in a hash map, for the few queries whose sums pass 2^32 - 2.
+fn wide(off: &[u32], adj: &[(u32, u32)], s: usize, t: usize) -> u64 {
+    let (mut dist, mut heap) = (HashMap::from([(s, 0u64)]), BinaryHeap::from([Reverse((0u64, s))]));
+    while let Some(Reverse((du, u))) = heap.pop() {
+        if u == t {
+            return du;
+        }
+        if du > dist[&u] {
+            continue;
+        }
+        for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
+            let (v, nd) = (v as usize, du + w as u64);
+            if dist.get(&v).map_or(true, |&x| nd < x) {
+                (dist.insert(v, nd), heap.push(Reverse((nd, v))));
+            }
+        }
+    }
+    u64::MAX
 }
 
 fn main() {
@@ -94,6 +114,72 @@ fn main() {
         }
     });
     drop(cur);
+    // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
+    // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
+    let own: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(u32::MAX)).collect();
+    let bfs = |r: usize, t: u32, q: &mut Vec<u32>| {
+        if own[r].compare_exchange(u32::MAX, t, Relaxed, Relaxed).is_err() {
+            return;
+        }
+        let mut h = q.len();
+        q.push(r as u32);
+        while h < q.len() {
+            let u = q[h] as usize;
+            h += 1;
+            for &(v, _) in &adj[off[u] as usize..off[u + 1] as usize] {
+                if own[v as usize].load(Relaxed) == u32::MAX
+                    && own[v as usize].compare_exchange(u32::MAX, t, Relaxed, Relaxed).is_ok()
+                {
+                    q.push(v);
+                }
+            }
+        }
+    };
+    let mut lists: Vec<Vec<u32>> = thread::scope(|sc| {
+        let hs: Vec<_> = (0..nt)
+            .map(|t| {
+                let bfs = &bfs;
+                sc.spawn(move || {
+                    let mut q = Vec::with_capacity(2 * n / nt);
+                    bfs(t * n / nt, t as u32, &mut q);
+                    q
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut rest = vec![];
+    for r in 0..n {
+        bfs(r, nt as u32, &mut rest);
+    }
+    lists.push(rest);
+    let ord: Vec<u32> = lists.concat();
+    drop((lists, own));
+    let mut id = vec![u32::MAX; n];
+    for (i, &o) in ord.iter().enumerate() {
+        id[o as usize] = i as u32;
+    }
+    let mut off2 = vec![0u32; n + 1];
+    for i in 0..n {
+        let o = ord[i] as usize;
+        off2[i + 1] = off2[i] + off[o + 1] - off[o];
+    }
+    let mut adj2: Vec<(u32, u32)> = vec![(0, 0); adj.len()];
+    let ap2 = adj2.as_mut_ptr() as usize;
+    thread::scope(|sc| {
+        for t in 0..nt {
+            let (ord, id, off, off2, adj) = (&ord, &id, &off, &off2, &adj);
+            sc.spawn(move || {
+                for i in t * n / nt..(t + 1) * n / nt {
+                    let o = ord[i] as usize;
+                    for (k, &(v, w)) in adj[off[o] as usize..off[o + 1] as usize].iter().enumerate() {
+                        unsafe { *(ap2 as *mut (u32, u32)).add(off2[i] as usize + k) = (id[v as usize], w) };
+                    }
+                }
+            });
+        }
+    });
+    let (off, adj) = (off2, adj2);
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
     while p < q.len() {
@@ -101,25 +187,25 @@ fn main() {
     }
     let ans: Vec<AtomicU64> = qs.iter().map(|_| AtomicU64::new(0)).collect();
     let next = AtomicUsize::new(0);
-    let (off, adj, ind) = (&off, &adj, &ind);
+    let (off, adj, ind, id) = (&off, &adj, &ind, &id);
     thread::scope(|sc| {
         for _ in 0..nt {
             let (qs, ans, next) = (&qs, &ans, &next);
             sc.spawn(move || {
-                let (mut dist, mut seen, mut heap) = (vec![u64::MAX; n], vec![], BinaryHeap::new());
+                let (mut dist, mut seen, mut heap) = (vec![u32::MAX; n], vec![], BinaryHeap::new());
                 loop {
                     let i = next.fetch_add(1, Relaxed);
-                    let Some(&(s, t)) = qs.get(i) else { break };
+                    let Some(&(s0, q0)) = qs.get(i) else { break };
+                    let (s, t) = (id[s0] as usize, id[q0] as usize);
                     let mut r = u64::MAX; // unreachable
                     if s == t {
                         r = 0;
-                    } else if ind[t].load(Relaxed) > 0 && off[s] < off[s + 1] {
-                        dist[s] = 0;
-                        seen.push(s as u32);
-                        heap.push(Reverse((0u64, s as u32)));
-                        while let Some(Reverse((du, u))) = heap.pop() {
-                            let u = u as usize;
-                            if du > dist[u] {
+                    } else if ind[q0].load(Relaxed) > 0 && off[s] < off[s + 1] {
+                        // u32 distances, heap entries dist << 32 | node; a sum that does not fit goes to `wide`.
+                        (dist[s] = 0, seen.push(s as u32), heap.push(Reverse(s as u64)));
+                        while let Some(Reverse(e)) = heap.pop() {
+                            let (du, u) = (e >> 32, e as u32 as usize);
+                            if du > dist[u] as u64 {
                                 continue;
                             }
                             if u == t {
@@ -128,17 +214,22 @@ fn main() {
                             }
                             for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
                                 let (v, nd) = (v as usize, du + w as u64);
-                                if nd < dist[v] {
-                                    if dist[v] == u64::MAX {
+                                if nd >= u32::MAX as u64 {
+                                    r = wide(off, adj, s, t);
+                                    heap.clear();
+                                    break;
+                                }
+                                if nd < dist[v] as u64 {
+                                    if dist[v] == u32::MAX {
                                         seen.push(v as u32);
                                     }
-                                    dist[v] = nd;
-                                    heap.push(Reverse((nd, v as u32)));
+                                    dist[v] = nd as u32;
+                                    heap.push(Reverse(nd << 32 | v as u64));
                                 }
                             }
                         }
                         for &v in &seen {
-                            dist[v as usize] = u64::MAX;
+                            dist[v as usize] = u32::MAX;
                         }
                         (seen.clear(), heap.clear());
                     }
