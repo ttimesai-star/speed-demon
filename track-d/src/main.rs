@@ -58,52 +58,51 @@ fn edges(d: &[u8], a: usize, b: usize, mut f: impl FnMut(usize, usize, u32)) {
     }
 }
 
-// One half of a bidirectional Dijkstra search: u32 distances, touched nodes, heap of dist << 32 | node.
+// One half (k = 0 forward, 1 backward) of a bidirectional Dijkstra search: touched nodes and a heap of
+// dist << 32 | node. Both halves' u32 labels share one array of pairs, so the meeting check at a settled
+// node reads the cache line its own label is in.
 struct Side {
-    d: Vec<u32>,
+    k: usize,
     seen: Vec<u32>,
     h: BinaryHeap<Reverse<u64>>,
 }
 
 impl Side {
-    fn new(n: usize) -> Side {
-        Side { d: vec![u32::MAX; n], seen: vec![], h: BinaryHeap::new() }
-    }
     fn top(&self) -> u64 {
         self.h.peek().map_or(u64::MAX, |r| r.0 >> 32)
     }
-    fn start(&mut self, s: usize) {
-        (self.d[s] = 0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
+    fn start(&mut self, d: &mut [[u32; 2]], s: usize) {
+        (d[s][self.k] = 0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
     }
     // Settles the nearest node; `best` takes its sum with the other half's label (checking at settle time
     // is enough for the stop rule top + top >= best). False if a sum does
     // not fit in u32 (the weights near 2^32 on the special nodes): the query then goes to `wide`.
-    fn step(&mut self, off: &[u32], adj: &[(u32, u32)], other: &[u32], best: &mut u64) -> bool {
+    fn step(&mut self, off: &[u32], adj: &[(u32, u32)], d: &mut [[u32; 2]], best: &mut u64) -> bool {
         let Reverse(e) = self.h.pop().unwrap();
-        let (du, u) = (e >> 32, e as u32 as usize);
-        if du > self.d[u] as u64 {
+        let (du, u, k) = (e >> 32, e as u32 as usize, self.k);
+        if du > d[u][k] as u64 {
             return true;
         }
-        if other[u] != u32::MAX {
-            *best = (*best).min(du + other[u] as u64);
+        if d[u][1 - k] != u32::MAX {
+            *best = (*best).min(du + d[u][1 - k] as u64);
         }
         for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
             let (v, nd) = (v as usize, du + w as u64);
             if nd >= u32::MAX as u64 {
                 return false;
             }
-            if nd < self.d[v] as u64 {
-                if self.d[v] == u32::MAX {
+            if nd < d[v][k] as u64 {
+                if d[v][k] == u32::MAX {
                     self.seen.push(v as u32);
                 }
-                (self.d[v] = nd as u32, self.h.push(Reverse(nd << 32 | v as u64)));
+                (d[v][k] = nd as u32, self.h.push(Reverse(nd << 32 | v as u64)));
             }
         }
         true
     }
-    fn reset(&mut self) {
+    fn reset(&mut self, d: &mut [[u32; 2]]) {
         for &v in &self.seen {
-            self.d[v as usize] = u32::MAX;
+            d[v as usize][self.k] = u32::MAX;
         }
         (self.seen.clear(), self.h.clear());
     }
@@ -296,7 +295,8 @@ fn main() {
         for _ in 0..nt {
             let (qs, ans, next) = (&qs, &ans, &next);
             sc.spawn(move || {
-                let (mut f, mut b) = (Side::new(n), Side::new(n));
+                let mut d = vec![[u32::MAX; 2]; n];
+                let (mut f, mut b) = (Side { k: 0, seen: vec![], h: BinaryHeap::new() }, Side { k: 1, seen: vec![], h: BinaryHeap::new() });
                 loop {
                     let i = next.fetch_add(1, Relaxed);
                     let Some(&(s, t)) = qs.get(i) else { break };
@@ -304,22 +304,22 @@ fn main() {
                     if s == t {
                         best = 0;
                     } else if roff[t] < roff[t + 1] && off[s] < off[s + 1] {
-                        (f.start(s), b.start(t));
+                        (f.start(&mut d, s), b.start(&mut d, t));
                         loop {
                             let (x, y) = (f.top(), b.top());
                             if x.saturating_add(y) >= best {
                                 break;
                             }
                             let ok = match x <= y {
-                                true => f.step(off, adj, &b.d, &mut best),
-                                false => b.step(roff, radj, &f.d, &mut best),
+                                true => f.step(off, adj, &mut d, &mut best),
+                                false => b.step(roff, radj, &mut d, &mut best),
                             };
                             if !ok {
                                 best = wide(off, adj, s, t);
                                 break;
                             }
                         }
-                        (f.reset(), b.reset());
+                        (f.reset(&mut d), b.reset(&mut d));
                     }
                     ans[i].store(best, Relaxed);
                 }
