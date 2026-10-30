@@ -222,14 +222,16 @@ fn main() {
         bfs(t * n / nt, t as u32, &mut q);
         q
     });
+    // The leftovers (nodes no BFS reached) are found in parallel, then claimed in one thread.
+    let cand = par(nt, |t| (t * n / nt..(t + 1) * n / nt).filter(|&r| own[r].load(Relaxed) == u32::MAX).collect::<Vec<_>>());
     let mut rest = vec![];
-    for r in (0..n).filter(|&r| own[r].load(Relaxed) == u32::MAX) {
-        bfs(r, nt as u32, &mut rest); // a plain load first: a CAS on every claimed node costs more
+    for r in cand.concat() {
+        bfs(r, nt as u32, &mut rest);
     }
     lists.push(rest);
     let ord: Vec<u32> = lists.concat();
     drop((lists, own));
-    // New id of each node and the degrees in the new order, in parallel by position.
+    // New id of each node and the degrees in the new order, then the offsets, in parallel by position.
     let mut id = vec![u32::MAX; n];
     let (ip, ordr, offr) = (id.as_mut_ptr() as usize, &ord, &off);
     let degs = par(nt, |t| {
@@ -240,12 +242,17 @@ fn main() {
                 offr[o + 1] - offr[o]
             })
             .collect::<Vec<u32>>()
-    })
-    .concat();
+    });
     let mut off2 = vec![0u32; n + 1];
-    for i in 0..n {
-        off2[i + 1] = off2[i] + degs[i];
-    }
+    let (o2, degr) = (off2.as_mut_ptr() as usize, &degs);
+    let base: Vec<u32> = degs.iter().scan(0, |a, c| (*a, *a += c.iter().sum::<u32>()).0.into()).collect();
+    par(nt, |t| {
+        let mut a = base[t];
+        for (k, &g) in degr[t].iter().enumerate() {
+            a += g;
+            unsafe { *(o2 as *mut u32).add(t * n / nt + k + 1) = a };
+        }
+    });
     drop(degs);
     let mut adj2: Vec<(u32, u32)> = vec![(0, 0); adj.len()];
     let ap2 = adj2.as_mut_ptr() as usize;
