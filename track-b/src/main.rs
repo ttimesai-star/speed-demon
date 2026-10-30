@@ -231,7 +231,7 @@ fn main() {
     }
     // Corpus: one chunk per thread at line starts; per thread a posting list per term and phrase matches.
     let d = load(&format!("{din}/docs.txt"));
-    let nt = thread::available_parallelism().map_or(12, |n| n.get());
+    let nt = 12;
     let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
     for b in &mut bs[1..] {
         while *b < d.len() && d[*b - 1] != b'\n' {
