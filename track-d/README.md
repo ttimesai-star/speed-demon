@@ -28,8 +28,9 @@ Rust, standard library only, one file (`src/main.rs`).
    sum to at least the best meeting. The meeting is checked when a node is settled: on every edge of a
    shortest path, the second of its two ends to be settled sees the other half's label. Labels are `u32`;
    a query whose sum reaches 2^32 - 1 (the weights near 2^32 on the special nodes) is redone with `u64`
-   distances in a hash map. Each worker keeps its label arrays for all its queries and resets only the
-   entries it touched.
+   distances in a hash map. Each worker keeps one array of label pairs (forward, backward) for all its
+   queries, so the meeting check reads the cache line of the node's own label, and resets only the entries
+   it touched.
 6. **Output.** Answers are stored by query index and written in input order, so the output does not depend on
    which worker answered which query.
 

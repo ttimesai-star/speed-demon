@@ -18,8 +18,8 @@ Rust, standard library only, one file (`src/main.rs`).
    each chunk starts at the first such LF after its nominal start: a short local scan, no pass over the file.
    (An earlier version counted the quotes of every chunk and used the parity; same chunks, one more read of
    202 MB.)
-3. **Parse, all threads.** Each record is read with SWAR and AVX2: numbers eight digits at a time, the
-   closing quote or comma of a field 32 bytes at a time; an optional BOM, the id, two text fields
+3. **Parse, all threads.** Each record is read with SWAR: numbers eight digits at a time, the closing quote
+   or comma of a field eight bytes at a time; an optional BOM, the id, two text fields
    (quoted: scan to the next `"`, a `""` pair counts as one byte; unquoted: up to the comma), the region id,
    the amount in integer cents, and CRLF or LF. `name_bytes` and `note_bytes` are the raw length minus the
    number of `""` pairs.
