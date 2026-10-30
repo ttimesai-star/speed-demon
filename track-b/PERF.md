@@ -17,7 +17,8 @@ Every step from the reference to your final version, each with the live-board ru
 | 10 | S: unix-only `load` (the PC build swaps in its own), a shorter `par()`; plus a `malloc_trim(0)` before the answers as a test of whether the peak is freed prep memory kept by malloc: M 184.8 MB, unchanged, so it is not (commit 1309be5; the trim is removed again in step 11) | run-9bd4481a6298 | 0.445 | 184.8 | 57.61 |
 | 11 | Byte search 32 bytes at a time with AVX2 (x86-64-v3) for each document's TAB and LF; a multiplicative hasher for the term map and one word buffer for all query lines (the query parse is serial). PC 270 → 264 ms. With it, final lists without a zero fill plus stream pages handed back (commit 44b3cb7, pushed as f9bb30a) | run-17ff47a2a95d | 0.444 | 186.2 | 57.34 |
 | 12 | PC peak profile by exit points (working set minus the 254 MB file read on Windows): after the queries 13 MB, after the corpus pass +99 MB (thread streams, bitsets, arrays), after sizing +75 MB: 75,747 small lists, whose malloc chunk headers touch every page whatever the fill. So all final lists now live in one buffer (one mapping, its pages touched only by the layout), and each term's list borrows its slice (`Cow`), so cloning a term's list for a query copies nothing. The hasher and AVX2 search are dropped (no gain on the board). PC 264 → 254 ms; board M still 185 MB, so its peak is elsewhere than the PC profile shows (commit 39f5587) | run-185c40b99e4b | 0.4334 | 185.3 | 57.59 |
-| 13 | The stream release dropped again (it moved nothing), S 576 → 558 | | | | |
+| 13 | The stream release dropped again (it moved nothing), S 576 → 558 (commit e461647, pushed as 2bf70a0) | run-f9e222f11029 | 0.432 | 185.6 | 57.72 |
+| 14 | Each layout thread sums its own start offsets (the documents of the threads before it per term) instead of 75,747 small vectors of starts. PC 256 → 251.5 ms | | | | |
 
 ## Correctness checks
 
