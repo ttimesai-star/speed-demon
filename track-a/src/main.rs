@@ -188,7 +188,7 @@ fn main() {
                     continue;
                 }
                 let r = [50, 95, 99].map(|p| (p * n + 99) / 100 - 1);
-                if n <= 32 {
+                if n <= 64 {
                     v.sort_unstable();
                 } else {
                     v.select_nth_unstable(r[2]);
