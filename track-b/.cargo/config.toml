@@ -1,0 +1,5 @@
+# Кладётся в track-X/.cargo/config.toml. TOML в S не считается, поэтому флаги здесь, а не в Dockerfile.
+# x86-64-v3 = AVX2/BMI2/FMA: есть на i5-13500, AVX-512 нет. Не "native": тогда трек собирают
+# на самой скоринговой машине (README harness), а v3 одинаково собирается и на build-машине доски.
+[build]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
