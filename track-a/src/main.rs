@@ -194,8 +194,16 @@ fn main() {
                 buf.extend_from_slice(ep(s));
                 let (e, q) = (errs[s], r.map(|k| v[k] as usize));
                 for x in [n, q[0], q[1], q[2], e, e * 1_000_000 / n] {
-                    buf.push(b' ');
-                    put(&mut buf, x);
+                    let (mut t, mut i, mut x) = ([b' '; 21], 21, x);
+                    loop {
+                        i -= 1;
+                        t[i] = b'0' + (x % 10) as u8;
+                        x /= 10;
+                        if x == 0 {
+                            break;
+                        }
+                    }
+                    buf.extend_from_slice(&t[i - 1..]);
                 }
                 buf.push(b'\n');
             }
