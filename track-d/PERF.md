@@ -15,6 +15,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 7 | Step 6 kept the old offsets, the BFS order and the degrees alive into the query phase (+21 MB): the reference names shadowed the vectors, so `drop` freed the references. Fixed (harness, 12 threads: 282 MB) (commit e80f39d, pushed as cad0914) | run-809d9adc5d18 | 0.2135 | 282.4 | 61.45 |
 | — | PGO (training on the seed-2 sample): board 0.2125 s, neutral; reverted | run-550d330bd124 | 0.2125 | 281.9 | 61.50 |
 | 8 | No fresh pages for the reverse CSR: its buckets reuse the forward pass's buckets and its edge array reuses the old (pre-renumbering) edge array, written slot by slot without a zero fill. PC 124 → 121 ms (commit da82400, pushed as cb2f844) | run-44ed9514eec5 | 0.2047 | 282.7 | 61.82 |
+| — | Software prefetch of the neighbours' labels before relaxing, and on a u32 overflow one step out of s first (u32 searches from its out-neighbours) instead of the u64 hash-map search: board 0.2068 s with S +21 (run-7d2fa7e4cfac, 61.60 points). Reverted to step 8 | run-7d2fa7e4cfac | 0.2068 | 282.6 | 61.60 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 

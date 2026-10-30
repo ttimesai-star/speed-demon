@@ -94,3 +94,9 @@ Formatting was the largest single piece of "select + format", hence step 5.
 Seed 1 sample and full (published hashes), seed 2 sample `fd26778f…` and full `fe3469ff…` (reference run
 locally on the same generated data), seed 1 tiny (published), the spec's worked example, an empty file.
 Every A/B binary is run 15–21 times and each run's hash is recorded: one hash per binary every time.
+
+## After step 13 (tried on the board, reverted)
+
+- **Worst-case per-hour reserve again** (`(b - a) / 40` records, THP still off): harness with 12 threads forced
+  28.7 vs 29.8 MB, but the board ran it in 0.0440 s instead of 0.0333 s (run-5f9529320ff1, 75.99 points):
+  1,728 separate large reservations cost more there than the small growing vectors. Reverted to step 13.
