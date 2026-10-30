@@ -67,11 +67,16 @@ fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
     }
 }
 
-fn put(b: &mut Vec<u8>, x: usize) {
-    if x >= 10 {
-        put(b, x / 10);
-    }
-    b.push(b'0' + (x % 10) as u8);
+// Appends " x" in decimal.
+fn put(b: &mut Vec<u8>, mut x: usize) {
+    let (mut t, mut i) = ([b' '; 21], 21);
+    while {
+        i -= 1;
+        t[i] = b'0' + (x % 10) as u8;
+        x /= 10;
+        x > 0
+    } {}
+    b.extend_from_slice(&t[i - 1..]);
 }
 
 // Parses the lines in d[a..b] into per-hour records.
@@ -201,7 +206,6 @@ fn main() {
                 buf.extend_from_slice(ep(s));
                 let (e, q) = (errs[s], r.map(|k| v[k] as usize));
                 for x in [n, q[0], q[1], q[2], e, e * 1_000_000 / n] {
-                    buf.push(b' ');
                     put(&mut buf, x);
                 }
                 buf.push(b'\n');
