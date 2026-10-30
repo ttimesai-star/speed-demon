@@ -168,7 +168,7 @@ fn main() {
                             cur[(m & 4095) as usize] += 1;
                         }
                     }
-                    drop(recs);
+                    std::mem::forget(recs);
                     let ah = 30 * 24 + 18 + h; // hours since 2026-10-00T00
                     let (day, mon) = if ah / 24 > 31 { (ah / 24 - 31, 11) } else { (ah / 24, 10) };
                     let label = format!("2026-{mon}-{day:02}T{:02}:00:00Z ", ah % 24);
