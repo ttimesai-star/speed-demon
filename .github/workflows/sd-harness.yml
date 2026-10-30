@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       track: { default: "a" }
+      thp: { default: "always" }
 jobs:
   harness:
     runs-on: ubuntu-latest
@@ -29,6 +30,7 @@ jobs:
           sudo apt-get install -y -qq vmtouch >/dev/null || true
           echo '{"exec-opts":["native.cgroupdriver=cgroupfs"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
+          echo ${{ inputs.thp || 'always' }} | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
           nproc; lscpu | grep -E "Model name|^CPU\(s\)"
       - name: run_submission (5 runs)
         run: |
