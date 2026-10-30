@@ -87,7 +87,7 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
                 p += k;
                 break;
             }
-            h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            h = h.rotate_left(29) ^ w;
             p += 8;
         }
         let sl = slot(tab, d, s, p - s, h) as u16 | ((d[p + 1] == b'5') as u16) << 12;
