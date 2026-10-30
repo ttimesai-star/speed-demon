@@ -9,10 +9,8 @@ fn load(path: &str) -> &'static [u8] {
     extern "C" {
         fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
         fn prctl(op: i32, ...) -> i32;
-        fn malloc_trim(pad: usize) -> i32;
     }
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) }; // PR_SET_THP_DISABLE: no 2 MB pages under the per-thread heaps
-    TRIM.store(malloc_trim as usize, Relaxed);
     let f = fs::File::open(path).unwrap();
     let n = f.metadata().unwrap().len() as usize;
     if n == 0 {
@@ -23,7 +21,6 @@ fn load(path: &str) -> &'static [u8] {
 
 
 const NONE: u32 = u32::MAX;
-static TRIM: AtomicUsize = AtomicUsize::new(0); // glibc malloc_trim, set on Linux
 
 // Runs f(0..nt) on nt threads and returns the results in thread order.
 fn par<T: Send>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
@@ -459,9 +456,6 @@ fn main() {
         }
     });
     drop(parts);
-    if let f @ 1.. = TRIM.load(Relaxed) {
-        unsafe { std::mem::transmute::<usize, extern "C" fn(usize) -> i32>(f)(0) }; // prep memory back to the kernel
-    }
     // Queries on all threads, answers by index.
     let ans: Vec<OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| OnceLock::new()).collect();
     let next = AtomicUsize::new(0);
