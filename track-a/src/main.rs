@@ -131,7 +131,7 @@ fn main() {
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) }; // PR_SET_THP_DISABLE: small vectors, no 2 MB pages
     let d = load(&format!("{din}/requests.log"));
-    let nt = thread::available_parallelism().map_or(12, |n| n.get());
+    let nt = 12;
     let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
     for b in &mut bs[1..] {
         while *b > 0 && *b < d.len() && d[*b - 1] != b'\n' {
