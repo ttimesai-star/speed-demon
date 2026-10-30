@@ -14,7 +14,6 @@ type Hour = (Vec<u32>, Vec<u16>);
 extern "C" {
     fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn prctl(op: i32, ...) -> i32;
-    fn malloc_trim(pad: usize) -> i32;
 }
 
 fn load(path: &str) -> &'static [u8] {
@@ -185,9 +184,6 @@ fn main() {
                 }
             }
             drop(recs);
-            if h % 6 == 5 {
-                unsafe { malloc_trim(0) }; // freed records back to the kernel while the output grows
-            }
             let ah = 30 * 24 + 18 + h; // hours since 2026-10-00T00
             let nov = (ah / 24 > 31) as usize;
             let day = ah / 24 - 31 * nov;
