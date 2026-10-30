@@ -15,7 +15,7 @@ Rust, standard library only, one file (`src/main.rs`).
    is the spec's byte rule, eight bytes at a time (SWAR): ASCII-lowercase, a token is a maximal run of `a-z0-9`, every other byte
    (including every byte of 0x80 and above) separates. The tokenizer runs one token ahead: the next token is found and
    hashed and its dictionary slot prefetched before the current one is looked up. Each document's TAB and LF
-   are found 32 bytes at a time (AVX2). Per document, the thread appends the ids of its distinct query terms to one flat
+   are found eight bytes at a time (SWAR). Per document, the thread appends the ids of its distinct query terms to one flat
    stream and counts documents per term; a term that passes 1/32 of the thread's documents goes to a bitset
    of the thread's range instead. From the counts, every term gets an exact list (or, if frequent, a bitset
    of all documents), and each thread lays its stream into it at its own offset, so lists come out sorted.
@@ -35,8 +35,8 @@ Rust, standard library only, one file (`src/main.rs`).
 
 ## Memory
 
-At the peak the thread streams and the final lists coexist. The final lists are allocated without a zero
-fill and the laid-out parts of each stream are handed back to the kernel (`madvise`) while the layout runs.
+All final lists live in one buffer, touched only by the layout; a term's list borrows its slice of it, so a
+query that starts from a term copies nothing. Frequent terms are bitsets of all documents (31 KB each).
 
 ## Dependencies
 

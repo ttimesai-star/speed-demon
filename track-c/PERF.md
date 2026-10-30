@@ -16,7 +16,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 8 | Three-stage pipeline: the name's id, then a prefetch of its word in the country bitset, the bit set one record later (PC 74.6 → 71.5 ms); `regions.csv` mapped and read in two passes instead of a 3.2 MB list of rows plus a 2.2 MB copy of the file (commits 22aea26, ee7955a) | run-16bc02fcc2c1 | 0.0626 | 12.1 | 70.45 |
 | 9 | Prefetch of the country entry right after the region id is parsed, used after the amount (commit fc68bc4, pushed as eb74b43) | run-7d802fb0711b | 0.0624 | 11.9 | 70.56 |
 | 10 | S: unix-only `load` (commit 1309be5) | run-8151737f38dd | 0.0625 | 12.5 | 70.36 |
-| 11 | Byte search for `"` and `,` 32 bytes at a time with AVX2, SWAR for the tail. PC 71.5 → 69.8 ms | | | | |
+| — | Byte search for `"` and `,` 32 bytes at a time with AVX2, SWAR for the tail: PC 71.5 → 69.8 ms, board 0.0634 s, no gain (run-61208674b19c); reverted. Board runs of unchanged code now spread by up to 8 % (0.0625–0.0678 s) | run-61208674b19c | 0.0634 | 11.9 | 70.30 |
 
 ## Correctness checks
 

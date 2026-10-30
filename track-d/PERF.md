@@ -18,6 +18,7 @@ Every step from the reference to your final version, each with the live-board ru
 | — | Software prefetch of the neighbours' labels before relaxing, and on a u32 overflow one step out of s first (u32 searches from its out-neighbours) instead of the u64 hash-map search: board 0.2068 s with S +21 (run-7d2fa7e4cfac, 61.60 points). Reverted to step 8 | run-7d2fa7e4cfac | 0.2068 | 282.6 | 61.60 |
 | — | Per-search open-addressing tables again, this time on top of step 8 (bucketed reverse CSR, so step 5's double scan is not the cause): board 0.438 s, M 260 MB (run-4ae948dc808b, 53.80 points). The tables themselves are slow on the box (on the PC: 0.44 extra probes per lookup, no clustering). Reverted to step 8 | run-4ae948dc808b | 0.438 | 259.7 | 53.80 |
 | 9 | S: unix-only `load`, a shorter `par()` (commit 1309be5) | run-17d166f4a76b | 0.2076 | 282.8 | 61.77 |
+| 10 | Both halves' labels in one array of `[u32; 2]`: the meeting check at a settled node reads the cache line of its own label. PC neutral (commit f651ca9, pushed as f9bb30a: 0.2045 s; same code again at 39f5587: 0.2009 s) | run-4060dd92a5fd | 0.2009 | 285.9 | 61.98 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 
