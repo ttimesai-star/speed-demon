@@ -13,14 +13,16 @@ Rust, standard library only, one file (`src/main.rs`).
    open-addressing dictionary; only these terms are indexed (section 3 allows it).
 2. **Corpus, all threads.** `docs.txt` is mapped and cut at line starts, one chunk per thread. The tokenizer
    is the spec's byte rule, eight bytes at a time (SWAR): ASCII-lowercase, a token is a maximal run of `a-z0-9`, every other byte
-   (including every byte of 0x80 and above) separates. Each token is hashed while it is scanned and looked
-   up in the dictionary. Per document, the thread appends the ids of its distinct query terms to one flat
+   (including every byte of 0x80 and above) separates. The tokenizer runs one token ahead: the next token is found and
+   hashed and its dictionary slot prefetched before the current one is looked up. Each document's TAB and LF
+   are found 32 bytes at a time (AVX2). Per document, the thread appends the ids of its distinct query terms to one flat
    stream and counts documents per term; a term that passes 1/32 of the thread's documents goes to a bitset
    of the thread's range instead. From the counts, every term gets an exact list (or, if frequent, a bitset
    of all documents), and each thread lays its stream into it at its own offset, so lists come out sorted.
 3. **BOOL** starts from the first term's set and applies each operator to the running result, strictly
-   left to right: galloping intersection and difference and merge union on lists; when a bitset is
-   involved, word-wise AND, OR and AND-NOT (a list is turned into a bitset first).
+   left to right: galloping intersection and difference and merge union on lists; AND of a list with a
+   bitset keeps the list side (filtered by bit tests), OR and NOT on a bitset work in place, and only
+   list OR bitset copies a bitset.
 4. **PHRASE, inside the corpus pass.** Each phrase gets one trigger term: the rarest of its terms by document
    counts on the first 1/64 of every chunk (a parallel pre-pass of about 4 MB), ties broken by length (any
    choice gives the same answer, a rare one is cheaper: the first version took the longest term, and checking
@@ -30,6 +32,11 @@ Rust, standard library only, one file (`src/main.rs`).
    needs no special case: the comparison is on consecutive positions. Matches arrive in document order.
 5. **Output.** Queries run on all threads from an atomic counter; answers are stored by query index and
    written in input order.
+
+## Memory
+
+At the peak the thread streams and the final lists coexist. The final lists are allocated without a zero
+fill and the laid-out parts of each stream are handed back to the kernel (`madvise`) while the layout runs.
 
 ## Dependencies
 
