@@ -8,7 +8,9 @@ fn load(path: &str) -> &'static [u8] {
     use std::os::unix::io::AsRawFd;
     extern "C" {
         fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+        fn prctl(op: i32, ...) -> i32;
     }
+    unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) }; // PR_SET_THP_DISABLE: sparse bitsets stay sparse
     let f = fs::File::open(path).unwrap();
     let n = f.metadata().unwrap().len() as usize;
     if n == 0 {
