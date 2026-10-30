@@ -20,8 +20,9 @@ Rust, standard library only, one file (`src/main.rs`).
    the amount in integer cents, and CRLF or LF. `name_bytes` and `note_bytes` are the raw length minus the
    number of `""` pairs.
 4. **Distinct names.** Unescaping is a bijection on the raw bytes between the quotes (every `"` inside is
-   doubled), so names are compared by their raw bytes. A shared lock-free table (insert by CAS, the key is the
-   offset and length of the first occurrence, compared byte for byte) gives each distinct name a dense id;
+   doubled), so names are compared by their raw bytes. A shared lock-free table gives each distinct name a dense id: a new
+   name is copied into a compact arena, then published by CAS as one word (arena offset, length, id); lookups
+   compare eight bytes at a time against the arena copy;
    the empty name, quoted or not, is id 0. Each country has a bitset of name ids, set with an atomic OR;
    `names_distinct` is its popcount. The bitsets live in zeroed memory, so only the touched pages cost.
 5. **Merge and output.** Per-thread sums, minima and maxima per country are merged in country order; money is
