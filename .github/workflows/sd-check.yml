@@ -1,0 +1,43 @@
+# Кладётся в .github/workflows/sd-check.yml репо команды ПОСЛЕ старта (тулинг вне track-*, в S не идёт — clarifications).
+# Ветки dev-*: сборка офлайн + прогон sample и full с флагами доски + сверка SHA-256. Доску (ветка speed-demon) не трогает.
+name: sd-check
+on:
+  push:
+    branches: ["dev-*"]
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        track: [a, b, c, d]
+    steps:
+      - uses: actions/checkout@v4
+      - name: skip if track folder absent
+        id: has
+        run: test -d track-${{ matrix.track }} && echo "ok=1" >> "$GITHUB_OUTPUT" || echo "ok=0" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.has.outputs.ok == '1'
+        with: { repository: hackathon-raptors/speed-demon-2026, path: sd2026 }
+      - uses: actions/setup-python@v5
+        if: steps.has.outputs.ok == '1'
+        with: { python-version: "3.13" }
+      - uses: actions/cache@v4
+        if: steps.has.outputs.ok == '1'
+        with:
+          path: data
+          key: sd-data-${{ matrix.track }}-${{ hashFiles('sd2026/generators/**') }}
+      - name: generate seed-1 data (sample + full)
+        if: steps.has.outputs.ok == '1'
+        run: |
+          g=$(ls sd2026/generators/${{ matrix.track }}_*.py)
+          for s in sample full; do [ -d data/$s/${{ matrix.track }} ] || python3 "$g" --seed 1 --scale $s --out data/$s/${{ matrix.track }}; done
+      - name: build offline + run sample + full, check sha256
+        if: steps.has.outputs.ok == '1'
+        run: |
+          t=${{ matrix.track }}
+          for s in sample full; do
+            exp=$(awk -F'\t' -v t=$t -v s=$s '$1==t && $2==s {print $5}' tools/expected_hashes.tsv)
+            python3 check.py $t --data data/$s/$t --expected "$exp" $([ $s = full ] && echo --skip-build) | tee -a "$GITHUB_STEP_SUMMARY"
+          done

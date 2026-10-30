@@ -1,0 +1,13 @@
+# Вариант с PGO: образ из allowlist с llvm-profdata (rustc 1.99.1, LLVM 23.1.1).
+# Тренировка на выходе генератора внутри сборки (FAQ 06 / changes 16): /data при сборке НЕ смонтирован.
+# Копия генератора, байт-в-байт как опубликован, в S не считается. Сборка ≤10 мин.
+FROM halloumee/speed-demon-rust:1.99.1-trixie-llvm-tools@sha256:13e4ee7135d8eac6c56476c7d1aee201f36479f4745fd5d0e6b4529f4e13251a AS build
+WORKDIR /src
+COPY . .
+# Шаги (дописать в окне 72 ч): 1) RUSTFLAGS="-Cprofile-generate=/tmp/pgo" cargo build --release --offline
+# 2) сгенерировать sample-данные копией генератора (нужен python3 — в образе rust:1-trixie он есть? проверить в первые минуты)
+# 3) прогнать бинарь на них  4) llvm-profdata merge -o /tmp/merged.profdata /tmp/pgo
+# 5) RUSTFLAGS="-Cprofile-use=/tmp/merged.profdata" cargo build --release --offline
+FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+COPY --from=build /src/target/release/solution /app/solution
+ENTRYPOINT ["/app/solution"]

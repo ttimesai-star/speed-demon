@@ -1,0 +1,11 @@
+# track	scale	seed	file	sha256	source
+a	full	1	summary.txt	495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3	specs/a-ingest.md §5 + harness/calibration-seed1.json
+a	sample	1	summary.txt	ca6311bbeb536fa55d85265bf6fd3d24cc9586f13de1ac73bd2a23ac3893aac3	specs/a-ingest.md §5
+a	tiny	1	summary.txt	c24fa507c963eaeac9224fd8435019b4f4e8c002ece7e32f316681a3957eb92f	specs/a-ingest.md §5
+b	full	1	results.txt	f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927	specs/b-index.md §5 + calibration-seed1.json
+b	sample	1	results.txt	eeeec1e9319da98a6f3c664c78f93e7078fd603c25c2bb3027174e81e3638a8f	specs/b-index.md §5
+c	full	1	aggregates.txt	d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536	specs/c-join.md §5 + calibration-seed1.json
+c	sample	1	aggregates.txt	9035fed36823232dd41ae2d1b9d6d21aa7c73f49d8e95647e953a89d5ebe9a66	specs/c-join.md §5
+d	full	1	distances.txt	a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e	specs/d-traverse.md §5 + calibration-seed1.json
+d	sample	1	distances.txt	a4c76ed030bc7e365db33191f6cf74708fba7f25eb48d64c8c4279f2e57046a0	specs/d-traverse.md §5
+d	worked	-	distances.txt	2e9871bba1d5013144ceff48d806a28da0e3f203b29118a89d98d8f654c3f6a0	specs/d-traverse.md §4 worked example
