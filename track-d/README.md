@@ -25,7 +25,7 @@ Rust, standard library only, one file (`src/main.rs`).
    search the whole graph). Every other query is a Dijkstra search from `s` with a binary heap that stops when
    `t` is settled. Distances are `u32` and heap entries one `u64` (`dist << 32 | node`); a query whose sum
    reaches 2^32 - 1 (the weights near 2^32 on the special nodes) is redone with `u64` distances in a hash map.
-   Each worker keeps one distance array for all its queries and resets only the entries it touched.
+   Each half keeps its labels in an open-addressing table of 2^18 slots (the node id is the hash: ids are BFS-local), reset by the list of touched slots; a search that would fill half of it goes to the `u64` path. This keeps M at about 160 MB instead of two dense arrays per thread.
 5. **Output.** Answers are stored by query index and written in input order, so the output does not depend on
    which worker answered which query.
 
