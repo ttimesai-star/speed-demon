@@ -38,6 +38,14 @@ fn word(d: &[u8], p: usize) -> u64 {
     }
 }
 
+// Up to eight ASCII digits, most significant in the low byte, zero bytes as leading zeros.
+fn digits(x: u64) -> u32 {
+    let x = x & 0x0F0F_0F0F_0F0F_0F0F;
+    let x = (x.wrapping_mul(10) + (x >> 8)) & 0x00FF_00FF_00FF_00FF;
+    let x = (x.wrapping_mul(100) + (x >> 16)) & 0x0000_FFFF_0000_FFFF;
+    (x.wrapping_mul(10000) + (x >> 32)) as u32
+}
+
 // Finds or inserts the endpoint d[s..s+n] in the shared table; returns its slot.
 fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
     let key = (s as u64) << 8 | n as u64;
@@ -51,7 +59,8 @@ fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
             }
         }
         let (vs, vn) = ((v >> 8) as usize, (v & 255) as usize);
-        if vn == n && d[vs..vs + n] == d[s..s + n] {
+        let same = |j: usize| (word(d, vs + j) ^ word(d, s + j)) << (8 * 8usize.saturating_sub(n - j)) == 0;
+        if vn == n && (0..n).step_by(8).all(same) {
             return i;
         }
         i = (i + 1) & (SLOTS - 1);
@@ -84,10 +93,16 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
         }
         let sl = slot(tab, d, s, p - s, h) as u16 | ((d[p + 1] == b'5') as u16) << 12;
         p += 5;
-        let mut v = 0u32;
-        while d[p] != b'\n' {
-            v = v * 10 + (d[p] - b'0') as u32;
-            p += 1;
+        let w = word(d, p);
+        let x = w ^ 0x0A0A_0A0A_0A0A_0A0A;
+        let k = (x.wrapping_sub(0x0101_0101_0101_0101) & !x & 0x8080_8080_8080_8080).trailing_zeros() as usize / 8;
+        let mut v = digits(w << (64 - 8 * k)); // up to 8 digits at once; latency has 1 to 10
+        p += k;
+        if k == 8 && d[p] != b'\n' {
+            while d[p] != b'\n' {
+                v = v * 10 + (d[p] - b'0') as u32;
+                p += 1;
+            }
         }
         out[hour].0.push(v);
         out[hour].1.push(sl);
