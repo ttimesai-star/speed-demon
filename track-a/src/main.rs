@@ -104,7 +104,7 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
                 p += 1;
             }
         }
-        let o = &mut out[hour];
+        let o = &mut out[0];
         o.0.push(v as u16);
         o.1.push(sl | ((v > 0xFFFF) as u16) << 13);
         if v > 0xFFFF {
