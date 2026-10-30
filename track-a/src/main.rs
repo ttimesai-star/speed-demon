@@ -68,6 +68,14 @@ fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
 
 // Parses the lines in d[a..b] into one (latencies, slots) pair per hour.
 fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
+    #[cfg(unix)]
+    unsafe {
+        extern "C" {
+            fn madvise(a: *const u8, len: usize, advice: i32) -> i32;
+        }
+        let p = a & !4095; // MADV_POPULATE_READ: map this chunk in one call instead of page faults
+        madvise(d.as_ptr().add(p), b - p, 22);
+    }
     let cap = (b - a) / 40 + 1; // a line has at least 40 bytes, so no vector ever grows
     let mut out: Vec<Hour> = (0..HOURS).map(|_| (Vec::with_capacity(cap), Vec::with_capacity(cap), Vec::with_capacity(cap))).collect();
     let mut i = a;
