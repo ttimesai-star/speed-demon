@@ -14,10 +14,13 @@ Rust, standard library only, one file (`src/main.rs`).
 2. **Corpus, all threads.** `docs.txt` is mapped and cut at line starts, one chunk per thread. The tokenizer
    is the spec's byte rule, eight bytes at a time (SWAR): ASCII-lowercase, a token is a maximal run of `a-z0-9`, every other byte
    (including every byte of 0x80 and above) separates. Each token is hashed while it is scanned and looked
-   up in the dictionary; a query term appends the document id to the thread's posting list for that term
-   once per document. Thread lists are concatenated in thread order, so every list is sorted.
-3. **BOOL** starts from the first term's list and applies each operator to the running result, strictly
-   left to right: merge intersection, merge union, merge difference.
+   up in the dictionary. Per document, the thread appends the ids of its distinct query terms to one flat
+   stream and counts documents per term; a term that passes 1/32 of the thread's documents goes to a bitset
+   of the thread's range instead. From the counts, every term gets an exact list (or, if frequent, a bitset
+   of all documents), and each thread lays its stream into it at its own offset, so lists come out sorted.
+3. **BOOL** starts from the first term's set and applies each operator to the running result, strictly
+   left to right: galloping intersection and difference and merge union on lists; when a bitset is
+   involved, word-wise AND, OR and AND-NOT (a list is turned into a bitset first).
 4. **PHRASE, inside the corpus pass.** Each phrase gets one trigger term, its longest term (long words are
    the rare ones; any choice gives the same answer, a rare one is cheaper). While a document is tokenized its
    token ids go to a buffer and the positions of trigger terms are noted; at the end of the document the
