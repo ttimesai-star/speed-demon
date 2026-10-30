@@ -163,11 +163,12 @@ fn main() {
             let mut cur = cnt.clone();
             lat.resize(cnt[SLOTS] as usize, 0);
             for r in &recs {
-                let mut j = 0;
+                let mut hi = r.2.iter();
                 for (&lo, &m) in r.0.iter().zip(&r.1) {
-                    let (g, big) = ((m & 4095) as usize, m >> 13 != 0);
-                    lat[cur[g] as usize] = lo as u32 | (if big { r.2[j] } else { 0 } as u32) << 16;
-                    (cur[g] += 1, j += big as usize);
+                    let v = lo as u32 | if m >> 13 != 0 { (*hi.next().unwrap() as u32) << 16 } else { 0 };
+                    let g = (m & 4095) as usize;
+                    lat[cur[g] as usize] = v;
+                    cur[g] += 1;
                 }
             }
             drop(recs);
