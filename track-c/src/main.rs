@@ -33,10 +33,17 @@ fn zeroed(n: usize) -> &'static [AtomicU64] {
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const AtomicU64, n) }
 }
 
-// Steps over the decimal digits at d[*p..] and returns their value.
+// Steps over the decimal digits at d[*p..] and returns their value, eight digits at a time: a digit has
+// bit 4 set, the separators that follow numbers here (, . CR LF) and the zero padding have it clear.
 fn num(d: &[u8], p: &mut usize) -> u64 {
-    let mut x = 0;
-    while d[*p].is_ascii_digit() {
+    let w = word(d, *p);
+    let k = (!w & 0x1010_1010_1010_1010).trailing_zeros() as usize / 8;
+    let x = (w << (64 - 8 * k) % 64) & 0x0F0F_0F0F_0F0F_0F0F & (k > 0) as u64 * u64::MAX;
+    let x = (x.wrapping_mul(10) + (x >> 8)) & 0x00FF_00FF_00FF_00FF;
+    let x = (x.wrapping_mul(100) + (x >> 16)) & 0x0000_FFFF_0000_FFFF;
+    let mut x = (x.wrapping_mul(10000) + (x >> 32)) & 0xFFFF_FFFF;
+    *p += k;
+    while k == 8 && d[*p].is_ascii_digit() {
         x = x * 10 + (d[*p] - b'0') as u64;
         *p += 1;
     }
