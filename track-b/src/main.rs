@@ -1,6 +1,6 @@
 // Speed Demon 2026, track B (Index). Spec: specs/b-index.md in hackathon-raptors/speed-demon-2026.
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::OnceLock;
 use std::{env, fs, thread};
 
@@ -191,10 +191,24 @@ enum Set {
     Bits(Vec<u64>), // bit i = document base + i
 }
 
-// A thread's set of one term, taken by the one merge worker that owns the term.
-struct Cell(*mut Set);
-unsafe impl Send for Cell {}
-unsafe impl Sync for Cell {}
+impl Set {
+    fn bits(self, words: usize) -> Vec<u64> {
+        let Set::List(l) = self else { return match self { Set::Bits(b) => b, _ => unreachable!() } };
+        let mut b = vec![0; words];
+        l.iter().for_each(|&x| b[x as usize / 64] |= 1 << (x % 64));
+        b
+    }
+}
+
+// What one thread's corpus pass leaves: documents per term, its bitsets, and the flat stream of term ids.
+struct Part {
+    cnt: Vec<u32>,
+    bit: Vec<u32>,
+    stream: Vec<u32>,
+    ends: Vec<u32>,
+    tb: Vec<Vec<u64>>,
+    found: Vec<(u32, u32)>,
+}
 
 // Document ids of s in ascending order (bit i of a bitset is document base + i).
 fn members(s: &Set, base: usize) -> Box<dyn Iterator<Item = usize> + '_> {
@@ -207,49 +221,25 @@ fn members(s: &Set, base: usize) -> Box<dyn Iterator<Item = usize> + '_> {
     }
 }
 
-// The list s plus document base + i, as a bitset of `range` documents from base.
-fn bits(s: &Set, base: usize, range: usize, i: usize) -> Vec<u64> {
-    let mut b = vec![0u64; range / 64 + 1];
-    for j in members(s, 0).map(|x| x - base).chain([i]) {
-        b[j / 64] |= 1 << (j % 64);
-    }
-    b
-}
-
-fn has(b: &[u64], x: u32) -> bool {
-    b[x as usize / 64] >> (x % 64) & 1 != 0
-}
-
-// Bit planes: popcount(w & PLANES[j]) << j summed over j is the sum of the set bit positions of w.
-const PLANES: [u64; 6] = [
-    0xAAAA_AAAA_AAAA_AAAA, 0xCCCC_CCCC_CCCC_CCCC, 0xF0F0_F0F0_F0F0_F0F0,
-    0xFF00_FF00_FF00_FF00, 0xFFFF_0000_FFFF_0000, 0xFFFF_FFFF_0000_0000,
-];
-
-// r AND / OR / NOT s, for every mix of lists and bitsets of all documents.
-fn apply(r: Set, op: u8, s: &Set) -> Set {
-    use Set::*;
-    match (op, r, s) {
-        (b'A', List(a), List(c)) => List(and(&a, c)),
-        (b'A', List(a), Bits(c)) => List(a.into_iter().filter(|&x| has(c, x)).collect()),
-        (b'A', Bits(a), List(c)) => List(c.iter().copied().filter(|&x| has(&a, x)).collect()),
-        (b'A', Bits(mut a), Bits(c)) => (a.iter_mut().zip(c).for_each(|(x, y)| *x &= y), Bits(a)).1,
-        (b'O', List(a), List(c)) => List(or(&a, c)),
-        (b'O', List(a), Bits(c)) => Bits(c.clone()).or_list(&a),
-        (b'O', Bits(a), List(c)) => Bits(a).or_list(c),
-        (b'O', Bits(mut a), Bits(c)) => (a.iter_mut().zip(c).for_each(|(x, y)| *x |= y), Bits(a)).1,
-        (_, List(a), List(c)) => List(not(&a, c)),
-        (_, List(a), Bits(c)) => List(a.into_iter().filter(|&x| !has(c, x)).collect()),
-        (_, Bits(mut a), List(c)) => (c.iter().for_each(|&x| a[x as usize / 64] &= !(1 << (x % 64))), Bits(a)).1,
-        (_, Bits(mut a), Bits(c)) => (a.iter_mut().zip(c).for_each(|(x, y)| *x &= !y), Bits(a)).1,
-    }
-}
-
-impl Set {
-    fn or_list(self, l: &[u32]) -> Set {
-        let Set::Bits(mut b) = self else { unreachable!() };
-        l.iter().for_each(|&x| b[x as usize / 64] |= 1 << (x % 64));
-        Set::Bits(b)
+// r AND / OR / NOT s; a list that meets a bitset becomes a bitset of all documents.
+fn apply(r: Set, op: u8, s: &Set, words: usize) -> Set {
+    match (r, s) {
+        (Set::List(a), Set::List(c)) => Set::List(match op {
+            b'A' => and(&a, c),
+            b'O' => or(&a, c),
+            _ => not(&a, c),
+        }),
+        (r, s) => {
+            let (mut a, c) = (r.bits(words), s.clone().bits(words));
+            for (x, y) in a.iter_mut().zip(c) {
+                *x = match op {
+                    b'A' => *x & y,
+                    b'O' => *x | y,
+                    _ => *x & !y,
+                };
+            }
+            Set::Bits(a)
+        }
     }
 }
 
@@ -299,8 +289,9 @@ fn main() {
         let j = (0..v.len()).max_by_key(|&j| (dict.terms[v[j] as usize].1, usize::MAX - j)).unwrap();
         trig[v[j] as usize].push((k as u32, j as u32));
     }
-    // Corpus: one chunk per thread at line starts. Thread t holds the documents [first[t], first[t + 1]);
-    // its posting list of a term becomes a bitset of that range once it is longer than the range / 32.
+    // Corpus: one chunk per thread at line starts. Thread t holds the documents [first[t], first[t + 1]) and
+    // writes, per document, the ids of its distinct query terms to one flat stream; a term that passes
+    // range / 32 documents in the thread goes to a bitset of the thread's range instead.
     let d = load(&format!("{din}/docs.txt"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
     let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
@@ -315,10 +306,10 @@ fn main() {
     let n = if d.is_empty() { 0 } else { id_at(last_line) + 1 };
     let first: Vec<usize> = (0..=nt).map(|t| if bs[t] < d.len() { id_at(bs[t]) } else { n }).collect();
     let (dict, trig, phr, bs, first) = (&dict, &trig, &phr, &bs, &first);
-    let mut parts = par(nt, |t| {
+    let parts = par(nt, |t| {
         let range = first[t + 1] - first[t];
-        let mut sets: Vec<Set> = (0..nterms).map(|_| Set::List(vec![])).collect();
-        let mut last = vec![NONE; nterms];
+        let (mut cnt, mut last, mut bit) = (vec![0u32; nterms], vec![NONE; nterms], vec![NONE; nterms]);
+        let (mut stream, mut ends, mut tb) = (vec![], vec![], vec![]);
         let (mut seq, mut hits, mut found, mut lastm) = (vec![], vec![], vec![], vec![NONE; phr.len()]);
         let mut p = bs[t];
         while p < bs[t + 1] {
@@ -327,21 +318,24 @@ fn main() {
             let end = tab + d[tab..].iter().position(|&c| c == b'\n').unwrap();
             let i = id as usize - first[t];
             tokens(dict, &d[tab + 1..end], |w| {
-                if w != NONE {
-                    if last[w as usize] != id {
-                        last[w as usize] = id;
-                        match &mut sets[w as usize] {
-                            Set::Bits(b) => b[i / 64] |= 1 << (i % 64),
-                            Set::List(l) if l.len() * 32 < range => l.push(id),
-                            s => *s = Set::Bits(bits(s, first[t], range, i)),
+                let u = w as usize;
+                if w != NONE && last[u] != id {
+                    last[u] = id;
+                    if bit[u] == NONE {
+                        (cnt[u] += 1, stream.push(w));
+                        if cnt[u] as usize * 32 >= range {
+                            (bit[u] = tb.len() as u32, tb.push(vec![0u64; range / 64 + 1]));
                         }
+                    } else {
+                        tb[bit[u] as usize][i / 64] |= 1 << (i % 64);
                     }
-                    if !trig[w as usize].is_empty() {
-                        hits.push((seq.len(), w));
-                    }
+                }
+                if w != NONE && !trig[u].is_empty() {
+                    hits.push((seq.len(), w));
                 }
                 seq.push(w);
             });
+            ends.push(stream.len() as u32);
             for &(at, w) in &hits {
                 for &(k, j) in &trig[w as usize] {
                     let v = &phr[k as usize];
@@ -354,43 +348,52 @@ fn main() {
             (seq.clear(), hits.clear());
             p = end + 1;
         }
-        (sets, found)
+        Part { cnt, bit, stream, ends, tb, found }
     });
     let mut pres: Vec<Vec<u32>> = vec![vec![]; phr.len()];
-    for (_, f) in &parts {
-        for &(k, id) in f {
+    for x in &parts {
+        for &(k, id) in &x.found {
             pres[k as usize].push(id); // threads in order, documents in order: sorted
         }
     }
-    // One set per term: a bitset of all n documents if any thread made one or it is long, else the
-    // concatenated lists. Term ranges in parallel; every thread part is freed as soon as it is used.
-    let cells: Vec<Vec<Cell>> = parts.iter_mut().map(|p| p.0.iter_mut().map(|s| Cell(s)).collect()).collect();
-    let cells = &cells;
-    let sets: Vec<Set> = par(nt, |c| {
-        (c * nterms / nt..(c + 1) * nterms / nt)
-            .map(|w| {
-                let mine: Vec<Set> = (0..nt).map(|t| (cells[t][w].0, Set::List(vec![]))).map(|(p, e)| std::mem::replace(unsafe { &mut *p }, e)).collect();
-                let len: usize = mine.iter().map(|s| if let Set::List(l) = s { l.len() } else { 0 }).sum();
-                if len * 32 < n && mine.iter().all(|s| matches!(s, Set::List(_))) {
-                    let mut l = Vec::with_capacity(len);
-                    for s in mine {
-                        if let Set::List(x) = s {
-                            l.extend_from_slice(&x);
-                        }
-                    }
-                    return Set::List(l);
+    // Exact sizes, then each thread lays its stream and bitsets into the final sets: a bitset of all n
+    // documents for a term that some thread turned into one or that is long, else a list.
+    let words = n / 64 + 1;
+    let mut sets: Vec<Set> = (0..nterms)
+        .map(|w| {
+            let len: usize = parts.iter().map(|x| x.cnt[w] as usize).sum();
+            match len * 32 < n && parts.iter().all(|x| x.bit[w] == NONE) {
+                true => Set::List(vec![0; len]),
+                false => Set::Bits(vec![0; words]),
+            }
+        })
+        .collect();
+    let mut at = vec![0u32; nterms]; // where thread t starts in each list
+    let starts: Vec<Vec<u32>> = parts.iter().map(|x| (at.clone(), at.iter_mut().zip(&x.cnt).for_each(|(a, c)| *a += c)).0).collect();
+    let ptrs: Vec<usize> = sets.iter_mut().map(|s| match s { Set::List(l) => l.as_mut_ptr() as usize, Set::Bits(b) => b.as_mut_ptr() as usize }).collect();
+    let big: Vec<bool> = sets.iter().map(|s| matches!(s, Set::Bits(_))).collect();
+    let (ptrs, big, starts, pr) = (&ptrs, &big, &starts, &parts);
+    par(nt, |t| {
+        let (x, mut cur) = (&pr[t], starts[t].clone());
+        let set = |w: usize, i: usize| unsafe { (*((ptrs[w] as *const AtomicU64).add(i / 64))).fetch_or(1 << (i % 64), Relaxed) };
+        let mut e = 0;
+        for (k, &end) in x.ends.iter().enumerate() {
+            for &w in &x.stream[e..end as usize] {
+                let w = w as usize;
+                match big[w] {
+                    true => drop(set(w, first[t] + k)),
+                    false => unsafe { *(ptrs[w] as *mut u32).add(cur[w] as usize) = (first[t] + k) as u32 },
                 }
-                let mut b = vec![0u64; n / 64 + 1];
-                for (t, s) in mine.into_iter().enumerate() {
-                    for i in members(&s, first[t]) {
-                        b[i / 64] |= 1 << (i % 64);
-                    }
-                }
-                Set::Bits(b)
-            })
-            .collect::<Vec<_>>()
-    })
-    .concat();
+                cur[w] += !big[w] as u32;
+            }
+            e = end as usize;
+        }
+        for w in (0..nterms).filter(|&w| x.bit[w] != NONE) {
+            for i in members(&Set::Bits(x.tb[x.bit[w] as usize].clone()), first[t]) {
+                set(w, i);
+            }
+        }
+    });
     drop(parts);
     // Queries on all threads, answers by index.
     let ans: Vec<OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| OnceLock::new()).collect();
@@ -403,7 +406,7 @@ fn main() {
             Query::Bool(v) => {
                 let mut r = sets[v[0].1 as usize].clone();
                 for &(op, w) in &v[1..] {
-                    r = apply(r, op, &sets[w as usize]);
+                    r = apply(r, op, &sets[w as usize], words);
                 }
                 r
             }
@@ -412,7 +415,8 @@ fn main() {
         let (count, sum) = match &r {
             Set::List(l) => (l.len() as u64, l.iter().map(|&x| x as u64).sum::<u64>()),
             Set::Bits(b) => b.iter().enumerate().fold((0, 0), |(c, s), (k, &w)| {
-                let pos: u64 = PLANES.iter().enumerate().map(|(j, &m)| ((w & m).count_ones() as u64) << j).sum();
+                let ones = |j: u32| (w & (!0u64 / ((1u64 << (1 << j)) + 1) << (1 << j))).count_ones() as u64;
+                let pos: u64 = (0..6).map(|j| ones(j) << j).sum(); // sum of the set bit positions
                 (c + w.count_ones() as u64, s + 64 * k as u64 * w.count_ones() as u64 + pos)
             }),
         };
