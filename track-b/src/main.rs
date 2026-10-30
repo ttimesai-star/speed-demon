@@ -107,9 +107,8 @@ impl Dict<'_> {
         }
         Dict { q, terms, slots }
     }
-    // Id of the token d[s..s+n] (lowercased), or NONE.
-    fn get(&self, d: &[u8], s: usize, n: usize) -> u32 {
-        let h = thash(d, s, n);
+    // Id of the token d[s..s+n] (lowercased) whose hash is h, or NONE.
+    fn get(&self, d: &[u8], s: usize, n: usize, h: u64) -> u32 {
         let m = self.slots.len() - 1;
         let mut i = (h >> 40) as usize & m;
         loop {
@@ -128,10 +127,14 @@ impl Dict<'_> {
     }
 }
 
-// Calls f(term id) for each token of text, in order (NONE for a token that is no query term).
+// Calls f(term id) for each token of text, in order (NONE for a token that is no query term). One token
+// ahead: the next token is found and hashed and its dictionary slot prefetched before this one is resolved.
 fn tokens(dict: &Dict, text: &[u8], mut f: impl FnMut(u32)) {
     let mut p = 0;
-    while p < text.len() {
+    let mut next = || loop {
+        if p >= text.len() {
+            return None;
+        }
         let m = tokmask(word(text, p));
         if m == 0 {
             p += 8;
@@ -147,8 +150,16 @@ fn tokens(dict: &Dict, text: &[u8], mut f: impl FnMut(u32)) {
             }
             n += 8;
         }
-        f(if n > 32 { NONE } else { dict.get(text, p, n) });
+        let h = if n > 32 { 0 } else { thash(text, p, n) };
+        let slot = dict.slots.as_ptr().wrapping_add((h >> 40) as usize & (dict.slots.len() - 1));
+        unsafe { std::arch::x86_64::_mm_prefetch::<3>(slot as *const i8) };
         p += n;
+        return Some((p - n, n, h));
+    };
+    let mut cur = next();
+    while let Some((s, n, h)) = cur {
+        cur = next();
+        f(if n > 32 { NONE } else { dict.get(text, s, n, h) });
     }
 }
 
