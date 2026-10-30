@@ -24,10 +24,27 @@ fn load(path: &str) -> &'static [u8] {
     fs::read(path).unwrap().leak()
 }
 
-// Reads the decimal number at d[*p..] and steps over it and the one separator after it.
+// Eight bytes at d[p..], little-endian, zero-padded past the end of d.
+fn word(d: &[u8], p: usize) -> u64 {
+    if p + 8 <= d.len() {
+        return u64::from_le(unsafe { (d.as_ptr().add(p) as *const u64).read_unaligned() });
+    }
+    let mut b = [0u8; 8];
+    b[..d.len() - p].copy_from_slice(&d[p..]);
+    u64::from_le_bytes(b)
+}
+
+// Reads the decimal number at d[*p..] and steps over it and the one separator after it. Up to eight
+// digits at once: a digit byte has bit 4 set, a space, LF or the zero padding has it clear.
 fn num(d: &[u8], p: &mut usize) -> u64 {
-    let mut x = 0;
-    while d[*p] >= b'0' {
+    let w = word(d, *p);
+    let k = (!w & 0x1010_1010_1010_1010).trailing_zeros() as usize / 8;
+    let x = (w << (64 - 8 * k)) & 0x0F0F_0F0F_0F0F_0F0F; // the digits, most significant in the low byte
+    let x = (x.wrapping_mul(10) + (x >> 8)) & 0x00FF_00FF_00FF_00FF;
+    let x = (x.wrapping_mul(100) + (x >> 16)) & 0x0000_FFFF_0000_FFFF;
+    let mut x = (x.wrapping_mul(10000) + (x >> 32)) & 0xFFFF_FFFF;
+    *p += k;
+    while k == 8 && d[*p] >= b'0' {
         x = x * 10 + (d[*p] - b'0') as u64;
         *p += 1;
     }
@@ -179,6 +196,7 @@ fn main() {
             });
         }
     });
+    drop((off, adj));
     let (off, adj) = (off2, adj2);
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
