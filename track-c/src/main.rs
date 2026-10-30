@@ -222,6 +222,8 @@ fn main() {
                         let (ns, nn, np) = field(d, &mut p);
                         let (_, tn, tp) = field(d, &mut p);
                         let reg = num(d, &mut p) as usize;
+                        let cp = country.as_ptr().wrapping_add(reg.min(country.len() - 1)) as *const i8;
+                        unsafe { std::arch::x86_64::_mm_prefetch::<3>(cp) }; // used after the amount is parsed
                         p += 1;
                         let neg = d[p] == b'-';
                         p += neg as usize;
