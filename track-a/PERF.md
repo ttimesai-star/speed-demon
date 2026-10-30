@@ -34,6 +34,19 @@ Every row passed the seed-1 full hash `495ca096…1cd3` and the seed-1 sample ha
 - Ablation (PC): number formatting with `write!` costs ~1 ms, the file write ~0.5 ms; freeing the
   per-hour vectors ~3 ms on Windows (kept: it holds M down while the output grows).
 
+| 7 | (this) | `word()`: one length check and an unaligned load instead of `d.get(p..p + 8)` + `try_into` (the range checks showed up as 6–7 % in `perf`) | — | — | — | A/B: 116.9 ms vs 122.2 ms for step 6 (−4.3 %) |
+
+## Linux `perf` profile (step 6, 2 threads)
+
+`perf record` on the runner (no hardware counters in the VM, so task-clock sampling): our code 73 %, libc 16 %
+(about 11 % of it `bcmp` from the endpoint compare, about 3 % `memcpy` from output assembly), kernel 11.5 %
+(file-mapping faults, zeroing fresh anonymous pages, memcg charging, teardown at exit). Inside our code the
+endpoint scan loop and the `word()` range checks led; `select_nth_unstable` was 7 %.
+
+Memory floor, measured with the harness on cut-down builds: mmap + exit only = 4.6 MB; after the parse,
+before any output = 18.3 MB; full run = 19.2 MB. The records (4.3 bytes per line, 13.3 MB) are nearly all
+of M above the floor.
+
 ## Linux phase profile (step 4, 2 threads, A/B VM)
 
 Load ~0.01 ms (mmap), parse ~98 ms, regroup ~0.5 ms, then per output worker: counting 2.8 ms, scatter 3.2 ms,
@@ -52,3 +65,8 @@ Formatting was the largest single piece of "select + format", hence step 5.
 - **Thread-local endpoint tables with a compact key arena** and dense global ranks (exp-local, 697f8ea;
   A/B 162.9 vs 151.2 ms, +8 %): the idea was that keys scattered over the 239 MB mapping cost TLB misses.
   The extra rank lookup per record and per-thread insertion cost more than they saved. Reverted.
+- **Inline word-wise compare again, on top of the faster `word()`** (exp-cmp2; A/B 112.0 vs 95.8 ms, +17 %):
+  glibc `bcmp` still wins. Reverted.
+- **`madvise(MADV_POPULATE_READ)` on each thread's chunk** (exp-madv; A/B 98.3 vs 95.8 ms, +2.6 %):
+  populating the page tables up front costs more than the fault-around path. Not taken.
+

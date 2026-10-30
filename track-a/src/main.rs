@@ -29,13 +29,12 @@ fn load(path: &str) -> &'static [u8] {
 }
 
 fn word(d: &[u8], p: usize) -> u64 {
-    match d.get(p..p + 8) {
-        Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
-        None => {
-            let mut b = [0u8; 8];
-            b[..d.len() - p].copy_from_slice(&d[p..]);
-            u64::from_le_bytes(b)
-        }
+    if p + 8 <= d.len() {
+        u64::from_le(unsafe { (d.as_ptr().add(p) as *const u64).read_unaligned() }) // in bounds: checked above
+    } else {
+        let mut b = [0u8; 8];
+        b[..d.len() - p].copy_from_slice(&d[p..]);
+        u64::from_le_bytes(b)
     }
 }
 
