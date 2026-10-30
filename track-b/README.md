@@ -21,8 +21,10 @@ Rust, standard library only, one file (`src/main.rs`).
 3. **BOOL** starts from the first term's set and applies each operator to the running result, strictly
    left to right: galloping intersection and difference and merge union on lists; when a bitset is
    involved, word-wise AND, OR and AND-NOT (a list is turned into a bitset first).
-4. **PHRASE, inside the corpus pass.** Each phrase gets one trigger term, its longest term (long words are
-   the rare ones; any choice gives the same answer, a rare one is cheaper). While a document is tokenized its
+4. **PHRASE, inside the corpus pass.** Each phrase gets one trigger term: the rarest of its terms by document
+   counts on the first 1/64 of every chunk (a parallel pre-pass of about 4 MB), ties broken by length (any
+   choice gives the same answer, a rare one is cheaper: the first version took the longest term, and checking
+   phrases at common words was a quarter of the corpus pass). While a document is tokenized its
    token ids go to a buffer and the positions of trigger terms are noted; at the end of the document the
    buffer is compared with every phrase of each trigger at the trigger's offset. A repeated term (`w w w`)
    needs no special case: the comparison is on consecutive positions. Matches arrive in document order.
