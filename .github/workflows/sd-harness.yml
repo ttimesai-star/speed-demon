@@ -37,5 +37,5 @@ jobs:
           exp=$(grep -P "^$t\tfull\t" tools/expected_hashes.tsv | cut -f5)
           sudo -E env PATH="$PATH" python3 sd2026/harness/run_submission.py --context track-$t --track $t \
             --data data/full/$t --output $out --expected-sha256 $exp --timeout-s 600 \
-            --timer ./sd-timer --cpuset 0-3 --work /tmp/sdw --results result.json || true
+            --timer ./sd-timer --cpuset 0-$(($(nproc)-1)) --work /tmp/sdw --results result.json || true
           cat result.json | tee -a "$GITHUB_STEP_SUMMARY"
