@@ -1,11 +1,12 @@
 // Speed Demon 2026, track A (Ingest). Spec: specs/a-ingest.md in hackathon-raptors/speed-demon-2026.
 use std::io::Write;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::Mutex;
 use std::{env, fs, thread};
 
 const SLOTS: usize = 4096; // endpoint hash table; the catalogue has 1,842 templates
 const HOURS: usize = 72; // the span is fixed by the spec: 2026-10-30T18 .. 2026-11-02T17
+type Hour = (Vec<u32>, Vec<u16>); // latencies and slot | 5xx << 12, one entry per line
 
 #[cfg(unix)]
 fn load(path: &str) -> &'static [u8] {
@@ -26,10 +27,21 @@ fn load(path: &str) -> &'static [u8] {
     Box::leak(fs::read(path).unwrap().into_boxed_slice())
 }
 
+fn word(d: &[u8], p: usize) -> u64 {
+    match d.get(p..p + 8) {
+        Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
+        None => {
+            let mut b = [0u8; 8];
+            b[..d.len() - p].copy_from_slice(&d[p..]);
+            u64::from_le_bytes(b)
+        }
+    }
+}
+
 // Finds or inserts the endpoint d[s..s+n] in the shared table; returns its slot.
-fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u32) -> usize {
+fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
     let key = (s as u64) << 8 | n as u64;
-    let mut i = h as usize & (SLOTS - 1);
+    let mut i = (h >> 52) as usize;
     loop {
         let mut v = tab[i].load(Relaxed);
         if v == 0 {
@@ -46,35 +58,42 @@ fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u32) -> usize {
     }
 }
 
-// Parses the lines in d[a..b]; calls f(group, is_5xx, latency) for each.
-fn walk(d: &[u8], a: usize, b: usize, tab: &[AtomicU64], hsrc: &[AtomicUsize], mut f: impl FnMut(usize, bool, u32)) {
+// Parses the lines in d[a..b] into one (latencies, slots) pair per hour.
+fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
+    let cap = (b - a) / 40 + 1; // a line has at least 40 bytes, so no vector ever grows
+    let mut out: Vec<Hour> = (0..HOURS).map(|_| (Vec::with_capacity(cap), Vec::with_capacity(cap))).collect();
     let mut i = a;
     while i < b {
         let num = |k: usize| (d[i + k] - b'0') as usize * 10 + (d[i + k + 1] - b'0') as usize;
         let hour = (num(8) + 31 * (d[i + 6] - b'0') as usize) * 24 + num(11) - 738;
-        hsrc[hour].store(i, Relaxed);
-        let mut p = i + 31;
-        while d[p] != b' ' {
-            p += 1;
+        let m = (d[i + 28] as usize * 7 + d[i + 29] as usize) >> 2 & 7;
+        let s = i + 29 + [6, 3, 0, 0, 5, 3, 7, 4][m]; // method length from its first two bytes
+        let (mut p, mut h) = (s, 0u64);
+        loop {
+            let w = word(d, p);
+            let x = w ^ 0x2020_2020_2020_2020;
+            let z = x.wrapping_sub(0x0101_0101_0101_0101) & !x & 0x8080_8080_8080_8080;
+            if z != 0 {
+                let k = z.trailing_zeros() as usize / 8;
+                h = (h ^ (w & ((1u64 << (8 * k)) - 1)) ^ (p + k - s) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                p += k;
+                break;
+            }
+            h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            p += 8;
         }
-        let s = p + 1;
-        let mut h = 0u32;
-        p = s;
-        while d[p] != b' ' {
-            h = h.wrapping_mul(31).wrapping_add(d[p] as u32);
-            p += 1;
-        }
-        let g = hour * SLOTS + slot(tab, d, s, p - s, h);
-        let err = d[p + 1] == b'5';
+        let sl = slot(tab, d, s, p - s, h) as u16 | ((d[p + 1] == b'5') as u16) << 12;
         p += 5;
         let mut v = 0u32;
         while d[p] != b'\n' {
             v = v * 10 + (d[p] - b'0') as u32;
             p += 1;
         }
-        f(g, err, v);
+        out[hour].0.push(v);
+        out[hour].1.push(sl);
         i = p + 1;
     }
+    out
 }
 
 fn main() {
@@ -82,89 +101,90 @@ fn main() {
     let (din, dout) = (args.get(1).map_or("/data", |s| s), args.get(2).map_or("/out", |s| s));
     let d = load(&format!("{din}/requests.log"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
-    let cut = |k: usize| match k {
-        0 => 0,
-        _ if k >= nt => d.len(),
-        _ => d[k * d.len() / nt..].iter().position(|&c| c == b'\n').unwrap() + k * d.len() / nt + 1,
+    let cut = |k: usize| match k * d.len() / nt {
+        x if k == nt => x,
+        x => d[x..].iter().position(|&c| c == b'\n').map_or(d.len(), |p| x + p + 1) * (k > 0) as usize,
     };
     let bounds: Vec<usize> = (0..=nt).map(cut).collect();
     let tab: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
-    let hsrc: Vec<AtomicUsize> = (0..HOURS).map(|_| AtomicUsize::new(0)).collect();
-    let cnt: Vec<AtomicU32> = (0..HOURS * SLOTS).map(|_| AtomicU32::new(0)).collect();
-    let errs: Vec<AtomicU32> = (0..HOURS * SLOTS).map(|_| AtomicU32::new(0)).collect();
-    let bounds = &bounds;
-    let par = |f: &(dyn Fn(usize, usize) + Sync)| {
-        thread::scope(|sc| {
-            for t in 0..nt {
-                sc.spawn(move || f(bounds[t], bounds[t + 1]));
-            }
-        })
-    };
-    par(&|a, b| {
-        walk(d, a, b, &tab, &hsrc, |g, e, _| {
-            cnt[g].fetch_add(1, Relaxed);
-            if e {
-                errs[g].fetch_add(1, Relaxed);
-            }
-        })
+    let (bs, tb) = (&bounds, &tab);
+    let parts: Vec<Vec<Hour>> = thread::scope(|sc| {
+        let hs: Vec<_> = (0..nt).map(|t| sc.spawn(move || parse(d, bs[t], bs[t + 1], tb))).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    let mut off = vec![0u32; HOURS * SLOTS + 1];
-    for g in 0..HOURS * SLOTS {
-        off[g + 1] = off[g] + cnt[g].swap(off[g], Relaxed);
+    let mut hours: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::new(Vec::new())).collect();
+    for p in parts {
+        for (h, x) in p.into_iter().enumerate() {
+            hours[h].get_mut().unwrap().push(x);
+        }
     }
-    let mut lat = vec![0u32; off[HOURS * SLOTS] as usize];
-    let la = unsafe { &*(lat.as_mut_slice() as *mut [u32] as *const [AtomicU32]) };
-    par(&|a, b| walk(d, a, b, &tab, &hsrc, |g, _, v| la[cnt[g].fetch_add(1, Relaxed) as usize].store(v, Relaxed)));
-
-    let ep = |v: u64| &d[(v >> 8) as usize..(v >> 8) as usize + (v & 255) as usize];
+    let ep = |s: usize| {
+        let v = tab[s].load(Relaxed);
+        &d[(v >> 8) as usize..(v >> 8) as usize + (v & 255) as usize]
+    };
     let mut order: Vec<usize> = (0..SLOTS).filter(|&s| tab[s].load(Relaxed) != 0).collect();
-    order.sort_by_key(|&s| ep(tab[s].load(Relaxed)));
-    let mut work = Vec::new();
-    let mut rest = lat.as_mut_slice();
-    for h in 0..HOURS {
-        let n = (off[(h + 1) * SLOTS] - off[h * SLOTS]) as usize;
-        let (part, tail) = rest.split_at_mut(n);
-        work.push((h, part));
-        rest = tail;
-    }
-    let work = Mutex::new(work);
-    let mut outs: Vec<Mutex<Vec<u8>>> = (0..HOURS).map(|_| Mutex::new(Vec::new())).collect();
+    order.sort_by_key(|&s| ep(s));
+    fs::create_dir_all(dout).unwrap();
+    let f = fs::File::create(format!("{dout}/summary.txt")).unwrap();
+    let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
     thread::scope(|sc| {
         for _ in 0..nt {
-            sc.spawn(|| loop {
-                let Some((h, part)) = work.lock().unwrap().pop() else { break };
-                let mut buf = Vec::new();
-                let base = off[h * SLOTS];
-                let hs = hsrc[h].load(Relaxed);
-                for &s in &order {
-                    let g = h * SLOTS + s;
-                    let (a, b) = ((off[g] - base) as usize, (cnt[g].load(Relaxed) - base) as usize);
-                    if a == b {
-                        continue;
+            sc.spawn(|| {
+                let (mut cnt, mut errs, mut cur) = (vec![0u32; SLOTS + 1], vec![0u32; SLOTS], vec![0u32; SLOTS]);
+                let (mut lat, mut buf) = (Vec::new(), Vec::new());
+                loop {
+                    let h = next.fetch_add(1, Relaxed);
+                    if h >= HOURS {
+                        break;
                     }
-                    let v = &mut part[a..b];
-                    let n = b - a;
-                    let r = [(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1, (99 * n + 99) / 100 - 1];
-                    v.select_nth_unstable(r[2]);
-                    if r[1] < r[2] {
-                        v[..r[2]].select_nth_unstable(r[1]);
+                    let recs = std::mem::take(&mut *hours[h].lock().unwrap());
+                    (cnt.fill(0), errs.fill(0), buf.clear());
+                    for &m in recs.iter().flat_map(|r| &r.1) {
+                        cnt[(m & 4095) as usize + 1] += 1;
+                        errs[(m & 4095) as usize] += (m >> 12) as u32;
                     }
-                    if r[0] < r[1] {
-                        v[..r[1]].select_nth_unstable(r[0]);
+                    for s in 0..SLOTS {
+                        cnt[s + 1] += cnt[s];
                     }
-                    let e = errs[g].load(Relaxed) as u64;
-                    buf.extend_from_slice(&d[hs..hs + 13]);
-                    buf.extend_from_slice(b":00:00Z ");
-                    buf.extend_from_slice(ep(tab[s].load(Relaxed)));
-                    writeln!(buf, " {n} {} {} {} {e} {}", v[r[0]], v[r[1]], v[r[2]], e * 1_000_000 / n as u64).unwrap();
+                    cur.copy_from_slice(&cnt[..SLOTS]);
+                    lat.resize(cnt[SLOTS] as usize, 0);
+                    for r in &recs {
+                        for (&v, &m) in r.0.iter().zip(&r.1) {
+                            lat[cur[(m & 4095) as usize] as usize] = v;
+                            cur[(m & 4095) as usize] += 1;
+                        }
+                    }
+                    drop(recs);
+                    let ah = 30 * 24 + 18 + h; // hours since 2026-10-00T00
+                    let (day, mon) = if ah / 24 > 31 { (ah / 24 - 31, 11) } else { (ah / 24, 10) };
+                    let label = format!("2026-{mon}-{day:02}T{:02}:00:00Z ", ah % 24);
+                    for &s in &order {
+                        let (a, b) = (cnt[s] as usize, cnt[s + 1] as usize);
+                        if a == b {
+                            continue;
+                        }
+                        let (v, n) = (&mut lat[a..b], b - a);
+                        let r = [(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1, (99 * n + 99) / 100 - 1];
+                        v.select_nth_unstable(r[2]);
+                        if r[1] < r[2] {
+                            v[..r[2]].select_nth_unstable(r[1]);
+                        }
+                        if r[0] < r[1] {
+                            v[..r[1]].select_nth_unstable(r[0]);
+                        }
+                        let e = errs[s] as u64;
+                        buf.extend_from_slice(label.as_bytes());
+                        buf.extend_from_slice(ep(s));
+                        let ppm = e * 1_000_000 / n as u64;
+                        writeln!(buf, " {n} {} {} {} {e} {ppm}", v[r[0]], v[r[1]], v[r[2]]).unwrap();
+                    }
+                    while done.load(Acquire) != h {
+                        thread::yield_now();
+                    }
+                    (&f).write_all(&buf).unwrap();
+                    done.store(h + 1, Release);
                 }
-                *outs[h].lock().unwrap() = buf;
             });
         }
     });
-    fs::create_dir_all(dout).unwrap();
-    let mut f = fs::File::create(format!("{dout}/summary.txt")).unwrap();
-    for o in outs.iter_mut() {
-        f.write_all(o.get_mut().unwrap()).unwrap();
-    }
 }
