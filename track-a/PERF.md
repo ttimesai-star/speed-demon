@@ -27,6 +27,8 @@ Every row passed the seed-1 full hash `495ca096…1cd3` and the seed-1 sample ha
 | 7 | 840f966 | `word()`: one length check and an unaligned load instead of `d.get(p..p + 8)` + `try_into` (the range checks showed up as 6–7 % in `perf`) | — | — | — | A/B: 116.9 ms vs 122.2 ms for step 6 (−4.3 %) |
 | 8 | 5bf7389 | Compact rewrite for S: same algorithm, mmap-only load (the board is Linux), helpers for the SWAR masks, recursive digit printer, one closure per output worker. S 255 → 196 lines after rustfmt | — | 0.146 | 19.4 | CI-harness; A/B: 147.9 vs 147.2 ms for step 7 (neutral) |
 | 9 | 2d1fe2d | One `u32` record per line, `(slot \| 5xx << 12 \| big << 13) << 16 \| latency & 0xFFFF`, instead of two `u16` vectors: one push per line instead of two | — | — | — | A/B: 103.4 vs 106.0 ms for step 8 (−2.5 %) |
+| 10 | 3170785 | Hour index from one 8-byte load of `MM-DDTHH` (low nibbles) instead of five bounds-checked byte loads | — | — | — | A/B: 116.6 vs 117.8 ms for step 9 (−1 %) |
+| 11 | 806d0d8 | PGO: instrumented build, training run on a 60,000-line slice of the seed-2 sample (`pgo/`, data, not code; seed 2 so the profile is not fitted to the board's seed), `llvm-profdata merge`, rebuild, all inside the same seven Dockerfile lines, from the allowlisted `halloumee/speed-demon-rust:1.99.1-trixie-llvm-tools` | board push 16:20 UTC, team not on the board yet | 0.144 | 18.5 | A/B (Docker-built): 114.8 vs 117.8 ms for step 9 (−2.5 %); CI-harness on a different CPU (EPYC 9V74) |
 
 ## Measurements that decided the design
 
@@ -79,10 +81,13 @@ Formatting was the largest single piece of "select + format", hence step 5.
   with a `checked_shl` mask on every word; the recursive digit printer and indexed high-half reads were neutral.
   Step 8 is the compact version with the old scan loop.
 
-## Pending
+- **Insertion sort threshold 16** for small groups (exp-sort16): aborts. At n = 17 the p95 and p99 ranks are
+  equal and the nested `select_nth_unstable` gets an index equal to its slice length. The ranks are distinct
+  from n = 25 on, so the threshold stays at 32 (now commented in the code). **Threshold 64**: 117.2 vs
+  117.8 ms, noise. Not taken.
 
-- **PGO** (exp-pgo): `halloumee/speed-demon-rust:1.99.1-trixie-llvm-tools`, instrumented build, training run on
-  a 60,000-line slice of the seed-2 sample (committed as data in `pgo/`; seed 2 so the profile is not fitted to
-  the board's seed), `llvm-profdata merge`, rebuild. Same seven Dockerfile lines. A/B with Docker-built binaries:
-  115.6 vs 118.1 ms (−2.1 %). To be applied last, because the profile follows the code.
+## Correctness checks (current version)
 
+Seed 1 sample and full (published hashes), seed 2 sample `fd26778f…` and full `fe3469ff…` (reference run
+locally on the same generated data), seed 1 tiny (published), the spec's worked example, an empty file.
+Every A/B binary is run 15–21 times and each run's hash is recorded: one hash per binary every time.
