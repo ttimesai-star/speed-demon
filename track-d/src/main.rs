@@ -306,6 +306,19 @@ fn main() {
             let (qs, ans, next) = (&qs, &ans, &next);
             sc.spawn(move || {
                 let (mut f, mut b) = (Side::new(n), Side::new(n));
+                // One bidirectional search; None if a sum does not fit in u32.
+                let mut search = |s: usize, t: usize| {
+                    let (mut best, mut ok) = (u64::MAX, true);
+                    (f.start(s), b.start(t));
+                    while ok && f.top().saturating_add(b.top()) < best {
+                        ok = match f.top() <= b.top() {
+                            true => f.step(off, adj, &b.d, &mut best),
+                            false => b.step(roff, radj, &f.d, &mut best),
+                        };
+                    }
+                    (f.reset(), b.reset());
+                    ok.then_some(best)
+                };
                 loop {
                     let i = next.fetch_add(1, Relaxed);
                     let Some(&(s, t)) = qs.get(i) else { break };
@@ -313,22 +326,12 @@ fn main() {
                     if s == t {
                         best = 0;
                     } else if roff[t] < roff[t + 1] && off[s] < off[s + 1] {
-                        (f.start(s), b.start(t));
-                        loop {
-                            let (x, y) = (f.top(), b.top());
-                            if x.saturating_add(y) >= best {
-                                break;
-                            }
-                            let ok = match x <= y {
-                                true => f.step(off, adj, &b.d, &mut best),
-                                false => b.step(roff, radj, &f.d, &mut best),
-                            };
-                            if !ok {
-                                best = wide(off, adj, s, t);
-                                break;
-                            }
-                        }
-                        (f.reset(), b.reset());
+                        // On an overflow (the weights near 2^32 out of the no-in-edge nodes), one step out of
+                        // s first: d(s, t) = min over s -> x of w + d(x, t); the u64 search only if that overflows.
+                        best = search(s, t).or_else(|| {
+                            let via = adj[off[s] as usize..off[s + 1] as usize].iter();
+                            via.map(|&(x, w)| search(x as usize, t).map(|r| r.saturating_add(w as u64))).collect::<Option<Vec<u64>>>()?.into_iter().min()
+                        }).unwrap_or_else(|| wide(off, adj, s, t));
                     }
                     ans[i].store(best, Relaxed);
                 }
