@@ -9,6 +9,8 @@ Every step from the reference to your final version, each with the live-board ru
 | 2 | `perf` on step 1: 23 % in libc (`bcmp` of each name against its first occurrence, a random spot in the 202 MB mapping), 17 % byte-by-byte field scans, 10 % the country lookup. Names are copied once into a compact arena and compared eight bytes at a time; the dense id lives in the table key (no second array, no wait for the inserting thread); word-wise name hash; SWAR search for `"` and `,`; country map `u8` instead of `u16`. Linux A/B 572.0 → 361.5 ms (−37 %). Then the quote count in 32-byte blocks with a `u8` sum (vectorises) and a 2 MB name table: 347.2 → 321.0 ms (−7.5 %) (commit 0309b99) | run-c09aeb31fe3d | 0.118 | 18.2 | 62.10 |
 | 3 | Popcount only over the words that can hold a name id (the sparse bitsets are 31.6 MB of address space; reading them all faulted in zero pages) (commit f79fc4d) | run-b16c8423e37a | 0.109 | 18.3 | 62.92 |
 | 4 | Country index from a 26^3 table (a code is a base-26 number, so number order is byte order) instead of sorting 200,000 codes: the regions phase was 16 ms of single-threaded work on the PC, before any parallel part. Linux A/B 299.2 → 280.5 ms (−6 %); the board gained more, its 12 threads wait on serial work (commit ca4391b) | run-53fbc2a217df | 0.0816 | 18.0 | 66.02 |
+| 5 | SWAR number parse: eight digits at once (a digit has bit 4 set; `,` `.` CR LF have it clear), for the id, the region id, the amount and the regions file. PC 92–107 → 77.5 ms on full, 18.5 → 13.6 ms on sample (commit a990d8a) | run-5e2036e1e69a | 0.0739 | 17.7 | 67.11 |
+| — | PGO (training on 1.8 MB of the seed-2 sample, CRLF kept): board 0.0821 s, no gain; reverted | run-742f1717b622 | 0.0821 | 17.6 | 66.06 |
 
 ## Correctness checks
 
