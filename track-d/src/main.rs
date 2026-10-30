@@ -226,20 +226,28 @@ fn main() {
         q
     });
     let mut rest = vec![];
-    for r in 0..n {
-        bfs(r, nt as u32, &mut rest);
+    for r in (0..n).filter(|&r| own[r].load(Relaxed) == u32::MAX) {
+        bfs(r, nt as u32, &mut rest); // a plain load first: a CAS on every claimed node costs more
     }
     lists.push(rest);
     let ord: Vec<u32> = lists.concat();
     drop((lists, own));
+    // New id of each node and the degrees in the new order, in parallel by position.
     let mut id = vec![u32::MAX; n];
-    for (i, &o) in ord.iter().enumerate() {
-        id[o as usize] = i as u32;
-    }
+    let (ip, ord, off) = (id.as_mut_ptr() as usize, &ord, &off);
+    let degs = par(nt, |t| {
+        (t * n / nt..(t + 1) * n / nt)
+            .map(|i| {
+                let o = ord[i] as usize;
+                unsafe { *(ip as *mut u32).add(o) = i as u32 };
+                off[o + 1] - off[o]
+            })
+            .collect::<Vec<u32>>()
+    })
+    .concat();
     let mut off2 = vec![0u32; n + 1];
     for i in 0..n {
-        let o = ord[i] as usize;
-        off2[i + 1] = off2[i] + off[o + 1] - off[o];
+        off2[i + 1] = off2[i] + degs[i];
     }
     let mut adj2: Vec<(u32, u32)> = vec![(0, 0); adj.len()];
     let ap2 = adj2.as_mut_ptr() as usize;
