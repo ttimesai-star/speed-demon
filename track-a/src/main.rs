@@ -1,6 +1,6 @@
 // Speed Demon 2026, track A (Ingest). Spec: specs/a-ingest.md in hackathon-raptors/speed-demon-2026.
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::*};
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
 use std::{env, fs, thread};
 
@@ -47,28 +47,10 @@ fn digits(x: u64) -> u32 {
     (x.wrapping_mul(10000) + (x >> 32)) as u32
 }
 
-// Finds or inserts the endpoint d[s..s+n] in the shared table; returns its slot.
-fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
-    let key = (s as u64) << 8 | n as u64;
-    let mut i = (h >> 52) as usize;
-    loop {
-        let mut v = tab[i].load(Relaxed);
-        if v == 0 {
-            match tab[i].compare_exchange(0, key, Relaxed, Relaxed) {
-                Ok(_) => return i,
-                Err(w) => v = w,
-            }
-        }
-        let (vs, vn) = ((v >> 8) as usize, (v & 255) as usize);
-        if vn == n && d[vs..vs + n] == d[s..s + n] {
-            return i;
-        }
-        i = (i + 1) & (SLOTS - 1);
-    }
-}
-
-// Parses the lines in d[a..b] into one (latencies, slots) pair per hour.
-fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
+// Parses the lines in d[a..b] into per-hour records. Endpoints get thread-local ids from an
+// open-addressing table; their bytes are copied into a compact arena (few pages, cache-resident).
+fn parse(d: &[u8], a: usize, b: usize) -> (Vec<Hour>, Vec<u64>, Vec<u8>) {
+    let (mut tab, mut arena, mut ids) = (vec![0u64; SLOTS], Vec::new(), 0u64);
     let cap = (b - a) / 40 + 1; // a line has at least 40 bytes, so no vector ever grows
     let mut out: Vec<Hour> = (0..HOURS).map(|_| (Vec::with_capacity(cap), Vec::with_capacity(cap), Vec::with_capacity(cap))).collect();
     let mut i = a;
@@ -91,7 +73,22 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
             h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
             p += 8;
         }
-        let sl = slot(tab, d, s, p - s, h) as u16 | ((d[p + 1] == b'5') as u16) << 12;
+        let (n, mut j) = (p - s, (h >> 52) as usize);
+        let id = loop {
+            let v = tab[j]; // id << 48 | arena offset << 8 | length
+            if v == 0 {
+                tab[j] = ids << 48 | (arena.len() as u64) << 8 | n as u64;
+                arena.extend_from_slice(&d[s..p]);
+                ids += 1;
+                break ids - 1;
+            }
+            let o = (v >> 8 & 0xFFFF_FFFF) as usize;
+            if v & 255 == n as u64 && arena[o..o + n] == d[s..p] {
+                break v >> 48;
+            }
+            j = (j + 1) & (SLOTS - 1);
+        };
+        let sl = id as u16 | ((d[p + 1] == b'5') as u16) << 12;
         p += 5;
         let w = word(d, p);
         let x = w ^ 0x0A0A_0A0A_0A0A_0A0A;
@@ -112,7 +109,7 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
         }
         i = p + 1;
     }
-    out
+    (out, tab, arena)
 }
 
 fn main() {
@@ -125,24 +122,33 @@ fn main() {
         x => d[x..].iter().position(|&c| c == b'\n').map_or(d.len(), |p| x + p + 1) * (k > 0) as usize,
     };
     let bounds: Vec<usize> = (0..=nt).map(cut).collect();
-    let tab: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
-    let (bs, tb) = (&bounds, &tab);
-    let parts: Vec<Vec<Hour>> = thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|t| sc.spawn(move || parse(d, bs[t], bs[t + 1], tb))).collect();
+    let bs = &bounds;
+    let mut parts: Vec<_> = thread::scope(|sc| {
+        let hs: Vec<_> = (0..nt).map(|t| sc.spawn(move || parse(d, bs[t], bs[t + 1]))).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    let mut hours: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::new(Vec::new())).collect();
-    for p in parts {
-        for (h, x) in p.into_iter().enumerate() {
-            hours[h].get_mut().unwrap().push(x);
+    // Global endpoint order: every distinct endpoint, sorted bytewise; maps[t][local id] = rank.
+    let key = |arena: &Vec<u8>, v: u64| {
+        let o = (v >> 8 & 0xFFFF_FFFF) as usize;
+        (v >> 48, arena[o..o + (v & 255) as usize].to_vec())
+    };
+    let local: Vec<Vec<(u64, Vec<u8>)>> =
+        parts.iter().map(|p| p.1.iter().filter(|&&v| v != 0).map(|&v| key(&p.2, v)).collect()).collect();
+    let mut eps: Vec<Vec<u8>> = local.iter().flatten().map(|x| x.1.clone()).collect();
+    (eps.sort_unstable(), eps.dedup());
+    let mut maps = vec![vec![0u16; SLOTS]; nt];
+    for (t, l) in local.iter().enumerate() {
+        for (id, k) in l {
+            maps[t][*id as usize] = eps.binary_search(k).unwrap() as u16;
         }
     }
-    let ep = |s: usize| {
-        let v = tab[s].load(Relaxed);
-        &d[(v >> 8) as usize..(v >> 8) as usize + (v & 255) as usize]
-    };
-    let mut order: Vec<usize> = (0..SLOTS).filter(|&s| tab[s].load(Relaxed) != 0).collect();
-    order.sort_by_key(|&s| ep(s));
+    let mut hours: Vec<Mutex<Vec<(usize, Hour)>>> = (0..HOURS).map(|_| Mutex::new(Vec::new())).collect();
+    for (t, p) in parts.drain(..).enumerate() {
+        for (h, x) in p.0.into_iter().enumerate() {
+            hours[h].get_mut().unwrap().push((t, x));
+        }
+    }
+    let ne = eps.len();
     fs::create_dir_all(dout).unwrap();
     let f = fs::File::create(format!("{dout}/summary.txt")).unwrap();
     let next = AtomicUsize::new(0);
@@ -150,7 +156,7 @@ fn main() {
     thread::scope(|sc| {
         for _ in 0..nt {
             sc.spawn(|| {
-                let (mut cnt, mut errs, mut cur) = (vec![0u32; SLOTS + 1], vec![0u32; SLOTS], vec![0u32; SLOTS]);
+                let (mut cnt, mut errs, mut cur) = (vec![0u32; ne + 1], vec![0u32; ne], vec![0u32; ne]);
                 let mut lat = Vec::new();
                 loop {
                     let h = next.fetch_add(1, Relaxed);
@@ -160,28 +166,32 @@ fn main() {
                     let recs = std::mem::take(&mut *hours[h].lock().unwrap());
                     let mut buf = Vec::new();
                     (cnt.fill(0), errs.fill(0));
-                    for &m in recs.iter().flat_map(|r| &r.1) {
-                        cnt[(m & 4095) as usize + 1] += 1;
-                        errs[(m & 4095) as usize] += (m >> 12 & 1) as u32;
+                    for (t, r) in &recs {
+                        for &m in &r.1 {
+                            let g = maps[*t][(m & 4095) as usize] as usize;
+                            cnt[g + 1] += 1;
+                            errs[g] += (m >> 12 & 1) as u32;
+                        }
                     }
-                    for s in 0..SLOTS {
-                        cnt[s + 1] += cnt[s];
+                    for g in 0..ne {
+                        cnt[g + 1] += cnt[g];
                     }
-                    cur.copy_from_slice(&cnt[..SLOTS]);
-                    lat.resize(cnt[SLOTS] as usize, 0);
-                    for r in &recs {
+                    cur.copy_from_slice(&cnt[..ne]);
+                    lat.resize(cnt[ne] as usize, 0);
+                    for (t, r) in &recs {
                         let mut hi = r.2.iter();
                         for (&lo, &m) in r.0.iter().zip(&r.1) {
                             let v = lo as u32 | if m >> 13 != 0 { (*hi.next().unwrap() as u32) << 16 } else { 0 };
-                            lat[cur[(m & 4095) as usize] as usize] = v;
-                            cur[(m & 4095) as usize] += 1;
+                            let g = maps[*t][(m & 4095) as usize] as usize;
+                            lat[cur[g] as usize] = v;
+                            cur[g] += 1;
                         }
                     }
                     drop(recs);
                     let ah = 30 * 24 + 18 + h; // hours since 2026-10-00T00
                     let (day, mon) = if ah / 24 > 31 { (ah / 24 - 31, 11) } else { (ah / 24, 10) };
                     let label = format!("2026-{mon}-{day:02}T{:02}:00:00Z ", ah % 24);
-                    for &s in &order {
+                    for s in 0..ne {
                         let (a, b) = (cnt[s] as usize, cnt[s + 1] as usize);
                         if a == b {
                             continue;
@@ -197,7 +207,7 @@ fn main() {
                         }
                         let e = errs[s] as u64;
                         buf.extend_from_slice(label.as_bytes());
-                        buf.extend_from_slice(ep(s));
+                        buf.extend_from_slice(&eps[s]);
                         for x in [n as u64, v[r[0]] as u64, v[r[1]] as u64, v[r[2]] as u64, e, e * 1_000_000 / n as u64] {
                             let (mut t, mut i, mut x) = ([b' '; 21], 21, x);
                             loop {
