@@ -234,13 +234,13 @@ fn main() {
     drop((lists, own));
     // New id of each node and the degrees in the new order, in parallel by position.
     let mut id = vec![u32::MAX; n];
-    let (ip, ord, off) = (id.as_mut_ptr() as usize, &ord, &off);
+    let (ip, ordr, offr) = (id.as_mut_ptr() as usize, &ord, &off);
     let degs = par(nt, |t| {
         (t * n / nt..(t + 1) * n / nt)
             .map(|i| {
-                let o = ord[i] as usize;
+                let o = ordr[i] as usize;
                 unsafe { *(ip as *mut u32).add(o) = i as u32 };
-                off[o + 1] - off[o]
+                offr[o + 1] - offr[o]
             })
             .collect::<Vec<u32>>()
     })
@@ -249,6 +249,7 @@ fn main() {
     for i in 0..n {
         off2[i + 1] = off2[i] + degs[i];
     }
+    drop(degs);
     let mut adj2: Vec<(u32, u32)> = vec![(0, 0); adj.len()];
     let ap2 = adj2.as_mut_ptr() as usize;
     thread::scope(|sc| {
