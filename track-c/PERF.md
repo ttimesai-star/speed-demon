@@ -14,6 +14,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 6 | No quote-counting pass: chunk starts from the section 2.2 guarantee (an LF followed by a digit or a BOM byte ends a record). PC 77.5 → 76.3 ms; one read of 202 MB less on the board (commit 18cace0) | run-b60748652c6a | 0.0730 | 17.7 | 67.46 |
 | 7 | Ablation on the PC: without the name lookup the parse is 13 ms faster (a third of it), without the country lookup no faster. Two-stage pipeline: each record's name slot is prefetched and the previous record's name is resolved and marked. PC 76.8 → 74.6 ms (commit fb752f6, pushed as 7dc1c88) | run-1c1fd2c854ad | 0.0669 | 17.7 | 68.23 |
 | 8 | Three-stage pipeline: the name's id, then a prefetch of its word in the country bitset, the bit set one record later (PC 74.6 → 71.5 ms); `regions.csv` mapped and read in two passes instead of a 3.2 MB list of rows plus a 2.2 MB copy of the file (commits 22aea26, ee7955a) | run-16bc02fcc2c1 | 0.0626 | 12.1 | 70.45 |
+| 9 | Prefetch of the country entry right after the region id is parsed, used after the amount (commit fc68bc4, pushed as eb74b43) | run-7d802fb0711b | 0.0624 | 11.9 | 70.56 |
 
 ## Correctness checks
 

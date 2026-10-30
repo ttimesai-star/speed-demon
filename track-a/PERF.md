@@ -100,3 +100,5 @@ Every A/B binary is run 15–21 times and each run's hash is recorded: one hash 
 - **Worst-case per-hour reserve again** (`(b - a) / 40` records, THP still off): harness with 12 threads forced
   28.7 vs 29.8 MB, but the board ran it in 0.0440 s instead of 0.0333 s (run-5f9529320ff1, 75.99 points):
   1,728 separate large reservations cost more there than the small growing vectors. Reverted to step 13.
+- **`malloc_trim(0)` after every sixth hour of output**, so that freed records leave M while the output file grows:
+  M 29.8 → 25.8 MB but T 0.0350 s (run-08f3b828211b, 79.12 points against 79.27). Reverted.
