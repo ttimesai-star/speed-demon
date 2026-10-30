@@ -125,6 +125,11 @@ fn main() {
         x => d[x..].iter().position(|&c| c == b'\n').map_or(d.len(), |p| x + p + 1) * (k > 0) as usize,
     };
     let bounds: Vec<usize> = (0..=nt).map(cut).collect();
+    fs::create_dir_all(dout).unwrap();
+    fs::File::create(format!("{dout}/summary.txt")).unwrap();
+    if d.len() > 0 {
+        return;
+    }
     let tab: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let (bs, tb) = (&bounds, &tab);
     let parts: Vec<Vec<Hour>> = thread::scope(|sc| {
