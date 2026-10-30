@@ -5,7 +5,6 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::{env, fs, thread};
 
-#[cfg(unix)]
 fn load(path: &str) -> &'static [u8] {
     use std::os::unix::io::AsRawFd;
     extern "C" {
@@ -19,10 +18,6 @@ fn load(path: &str) -> &'static [u8] {
     unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), n, 1, 2, f.as_raw_fd(), 0), n) }
 }
 
-#[cfg(not(unix))]
-fn load(path: &str) -> &'static [u8] {
-    fs::read(path).unwrap().leak()
-}
 
 // Eight bytes at d[p..], little-endian, zero-padded past the end of d.
 fn word(d: &[u8], p: usize) -> u64 {
@@ -136,8 +131,9 @@ fn wide(off: &[u32], adj: &[(u32, u32)], s: usize, t: usize) -> u64 {
 
 // Runs f(0..nt) on nt threads and returns the results in thread order.
 fn par<T: Send>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let f = &f;
     thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|t| sc.spawn({ let f = &f; move || f(t) })).collect();
+        let hs: Vec<_> = (0..nt).map(|t| sc.spawn(move || f(t))).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     })
 }

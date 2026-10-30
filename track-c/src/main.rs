@@ -3,7 +3,6 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 use std::{env, fs, thread};
 
-#[cfg(unix)]
 fn load(path: &str) -> &'static [u8] {
     use std::os::unix::io::AsRawFd;
     extern "C" {
@@ -19,10 +18,6 @@ fn load(path: &str) -> &'static [u8] {
     unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), n, 1, 2, f.as_raw_fd(), 0), n) }
 }
 
-#[cfg(not(unix))]
-fn load(path: &str) -> &'static [u8] {
-    fs::read(path).unwrap().leak()
-}
 
 const SLOTS: usize = 1 << 18; // name table; the generator's pool has 100,000 names (ids < 2^20)
 const IDS: usize = 1 << 20; // bits per country bitset, only the touched pages cost memory
