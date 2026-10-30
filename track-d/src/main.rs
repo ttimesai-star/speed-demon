@@ -275,6 +275,7 @@ fn main() {
     while p < q.len() {
         qs.push((id[num(&q, &mut p) as usize] as usize, id[num(&q, &mut p) as usize] as usize));
     }
+    drop(id);
     let ans: Vec<AtomicU64> = qs.iter().map(|_| AtomicU64::new(0)).collect();
     let next = AtomicUsize::new(0);
     let (off, adj, roff, radj) = (&off, &adj, &roff, &radj);
