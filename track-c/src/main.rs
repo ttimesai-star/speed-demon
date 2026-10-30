@@ -143,22 +143,27 @@ fn money(out: &mut Vec<u8>, c: i64) {
 fn main() {
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
-    // regions.csv: region id -> country index + 1, countries in byte order.
+    // regions.csv: region id -> country index, countries in byte order. A code is a base-26 number, so the
+    // order of the numbers is the byte order and a 26^3 table replaces a sort.
     let r = fs::read(format!("{din}/regions.csv")).unwrap();
-    let mut rows = vec![];
+    let (mut rows, mut idx) = (vec![], vec![u16::MAX; 26 * 26 * 26]);
     let mut p = r.iter().position(|&c| c == b'\n').unwrap() + 1;
     while p < r.len() {
         let id = num(&r, &mut p) as usize;
-        rows.push((id, [r[p + 1], r[p + 2], r[p + 3]]));
-        p += 5;
+        let key = r[p + 1..p + 4].iter().fold(0, |k, &c| k * 26 + (c - b'A') as usize);
+        (rows.push((id, key)), idx[key] = 0, p += 5);
     }
-    let mut codes: Vec<[u8; 3]> = rows.iter().map(|x| x.1).collect();
-    (codes.sort_unstable(), codes.dedup());
+    let mut codes = vec![];
+    for key in 0..idx.len() {
+        if idx[key] == 0 {
+            (idx[key] = codes.len() as u16, codes.push([key / 676, key / 26 % 26, key % 26].map(|x| b'A' + x as u8)));
+        }
+    }
     let nc = codes.len(); // index nc is _UNMATCHED
     assert!(nc < 256);
     let mut country = vec![nc as u8; rows.iter().map(|x| x.0).max().unwrap_or(0) + 1];
-    for (id, c) in &rows {
-        country[*id] = codes.binary_search(c).unwrap() as u8;
+    for &(id, key) in &rows {
+        country[id] = idx[key] as u8;
     }
     let d = load(&format!("{din}/records.csv"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
