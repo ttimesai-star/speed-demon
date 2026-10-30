@@ -76,20 +76,22 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
         let hour = (num(8) + 31 * (d[i + 6] - b'0') as usize) * 24 + num(11) - 738;
         let m = (d[i + 28] as usize * 7 + d[i + 29] as usize) >> 2 & 7;
         let s = i + 29 + [6, 3, 0, 0, 5, 3, 7, 4][m]; // method length from its first two bytes
-        let (mut p, mut h) = (s, 0u64);
+        let mut p = s;
         loop {
-            let w = word(d, p);
-            let x = w ^ 0x2020_2020_2020_2020;
+            let x = word(d, p) ^ 0x2020_2020_2020_2020;
             let z = x.wrapping_sub(0x0101_0101_0101_0101) & !x & 0x8080_8080_8080_8080;
             if z != 0 {
-                let k = z.trailing_zeros() as usize / 8;
-                h = (h ^ (w & ((1u64 << (8 * k)) - 1)) ^ (p + k - s) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                p += k;
+                p += z.trailing_zeros() as usize / 8;
                 break;
             }
-            h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
             p += 8;
         }
+        // Hash of the length, the first 16 bytes and the last 8: no multiply chain inside the scan.
+        let n = p - s;
+        let m = |k: usize| if k >= 8 { !0u64 } else { (1u64 << (8 * k)) - 1 };
+        let (w0, w1) = (word(d, s) & m(n), word(d, s + 8) & m(n.saturating_sub(8)));
+        let wt = if n >= 16 { word(d, p - 8) } else { 0 };
+        let h = (w0 ^ w1.rotate_left(21) ^ wt.rotate_left(42) ^ n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let sl = slot(tab, d, s, p - s, h) as u16 | ((d[p + 1] == b'5') as u16) << 12;
         p += 5;
         let w = word(d, p);
