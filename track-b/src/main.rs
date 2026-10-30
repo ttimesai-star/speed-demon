@@ -293,7 +293,7 @@ fn main() {
     // writes, per document, the ids of its distinct query terms to one flat stream; a term that passes
     // range / 32 documents in the thread goes to a bitset of the thread's range instead.
     let d = load(&format!("{din}/docs.txt"));
-    let nt = thread::available_parallelism().map_or(12, |n| n.get());
+    let nt = 12;
     let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
     for b in &mut bs[1..] {
         while *b < d.len() && d[*b - 1] != b'\n' {
