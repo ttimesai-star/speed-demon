@@ -1,0 +1,56 @@
+# A/B timing of several commits of one track in the same VM (native binaries, interleaved runs).
+# Tooling outside track-*, not counted in S. Usage: gh workflow run sd-ab.yml -f refs="sha1 sha2" -f track=a
+name: sd-ab
+on:
+  workflow_dispatch:
+    inputs:
+      refs: { required: true }
+      track: { default: "a" }
+      rounds: { default: "15" }
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/checkout@v4
+        with: { repository: hackathon-raptors/speed-demon-2026, path: sd2026 }
+      - uses: actions/cache@v4
+        with:
+          path: data
+          key: sd-data-${{ inputs.track }}-${{ hashFiles('sd2026/generators/**') }}
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - name: data
+        run: |
+          t=${{ inputs.track }}
+          g=$(ls sd2026/generators/${t}_*.py)
+          [ -d data/full/$t ] || python3 "$g" --seed 1 --scale full --out data/full/$t
+      - name: build each ref
+        run: |
+          mkdir -p bins
+          for r in ${{ inputs.refs }}; do
+            rm -rf /tmp/wt && git worktree add -f /tmp/wt $r
+            (cd /tmp/wt/track-${{ inputs.track }} && cargo build --release -q) && cp /tmp/wt/track-${{ inputs.track }}/target/release/solution bins/$r
+            git worktree remove -f /tmp/wt
+          done
+          ls -la bins; nproc
+      - name: interleaved runs
+        run: |
+          cat > ab.py <<'EOF'
+          import hashlib, os, resource, subprocess, sys, time
+          track, rounds, refs = sys.argv[1], int(sys.argv[2]), sys.argv[3:]
+          data = f"data/full/{track}"; out = "/tmp/abo"; os.makedirs(out, exist_ok=True)
+          res = {r: [] for r in refs}; hs = {r: set() for r in refs}
+          for _ in range(rounds):
+              for r in refs:
+                  t = time.perf_counter(); subprocess.run([f"bins/{r}", data, out], check=True)
+                  res[r].append(time.perf_counter() - t)
+                  f = [x for x in os.listdir(out)][0]
+                  hs[r].add(hashlib.sha256(open(f"{out}/{f}", "rb").read()).hexdigest()[:12])
+          for r in refs:
+              s = sorted(res[r]); k = len(s) // 4
+              mid = s[k:len(s) - k]
+              print(f"{r[:10]}  median {s[len(s)//2]*1000:.1f} ms  trimmed-mean {sum(mid)/len(mid)*1000:.1f} ms  min {s[0]*1000:.1f}  hashes {sorted(hs[r])}")
+          EOF
+          python3 ab.py ${{ inputs.track }} ${{ inputs.rounds }} ${{ inputs.refs }} | tee -a "$GITHUB_STEP_SUMMARY"
