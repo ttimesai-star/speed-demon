@@ -294,13 +294,6 @@ fn main() {
     }
     let nterms = terms.len();
     let dict = Dict::new(&q, terms);
-    // Each phrase is checked in the corpus pass at the occurrences of one trigger term, its longest term
-    // (long words are the rare ones; any choice is correct, a rare one is cheaper).
-    let mut trig: Vec<Vec<(u32, u32)>> = vec![vec![]; nterms]; // term -> (phrase, offset in the phrase)
-    for (k, v) in phr.iter().enumerate() {
-        let j = (0..v.len()).max_by_key(|&j| (dict.terms[v[j] as usize].1, usize::MAX - j)).unwrap();
-        trig[v[j] as usize].push((k as u32, j as u32));
-    }
     // Corpus: one chunk per thread at line starts. Thread t holds the documents [first[t], first[t + 1]) and
     // writes, per document, the ids of its distinct query terms to one flat stream; a term that passes
     // range / 32 documents in the thread goes to a bitset of the thread's range instead.
@@ -317,7 +310,31 @@ fn main() {
     let last_line = d[..d.len().saturating_sub(1)].iter().rposition(|&c| c == b'\n').map_or(0, |x| x + 1);
     let n = if d.is_empty() { 0 } else { id_at(last_line) + 1 };
     let first: Vec<usize> = (0..=nt).map(|t| if bs[t] < d.len() { id_at(bs[t]) } else { n }).collect();
-    let (dict, trig, phr, bs, first) = (&dict, &trig, &phr, &bs, &first);
+    // Each phrase is checked in the corpus pass at the occurrences of one trigger term: the rarest of its
+    // terms by document counts on the first 1/64 of every chunk, then the longest (any choice is correct, a
+    // rare one is cheaper).
+    let dict = &dict;
+    let est = par(nt, |t| {
+        let (mut c, mut last, mut p) = (vec![0u32; nterms], vec![NONE; nterms], bs[t]);
+        while p < bs[t] + (bs[t + 1] - bs[t]) / 64 {
+            let (tab, id) = (find(d, p, b'\t'), p as u32);
+            let end = find(d, tab, b'\n');
+            tokens(dict, &d[tab + 1..end], |w| {
+                if w != NONE && last[w as usize] != id {
+                    (last[w as usize] = id, c[w as usize] += 1);
+                }
+            });
+            p = end + 1;
+        }
+        c
+    });
+    let mut trig: Vec<Vec<(u32, u32)>> = vec![vec![]; nterms]; // term -> (phrase, offset in the phrase)
+    for (k, v) in phr.iter().enumerate() {
+        let df = |w: u32| est.iter().map(|c| c[w as usize]).sum::<u32>();
+        let j = (0..v.len()).min_by_key(|&j| (df(v[j]), usize::MAX - dict.terms[v[j] as usize].1, j)).unwrap();
+        trig[v[j] as usize].push((k as u32, j as u32));
+    }
+    let (dict, trig, phr, bs, first) = (dict, &trig, &phr, &bs, &first);
     let parts = par(nt, |t| {
         let range = first[t + 1] - first[t];
         let (mut cnt, mut last, mut bit) = (vec![0u32; nterms], vec![NONE; nterms], vec![NONE; nterms]);
