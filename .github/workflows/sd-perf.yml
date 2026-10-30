@@ -37,6 +37,7 @@ jobs:
           B=/tmp/wt/track-$t/target/release/solution; mkdir -p /tmp/o
           for i in 1 2 3; do $B data/full/$t /tmp/o; done
           $P stat -e task-clock,page-faults,cycles,instructions,branches,branch-misses,cache-misses,dTLB-load-misses -r 5 $B data/full/$t /tmp/o 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
-          $P record -F 20000 -g -o /tmp/perf.data $B data/full/$t /tmp/o 2>/dev/null
-          $P report -i /tmp/perf.data --stdio --no-children --sort sym 2>/dev/null | grep -v "^$" | head -60
-          $P report -i /tmp/perf.data --stdio --no-children --sort srcline 2>/dev/null | grep -E "^ +[0-9]" | head -60
+          $P record -F 20000 -o /tmp/perf.data $B data/full/$t /tmp/o 2>/dev/null
+          $P report -i /tmp/perf.data --stdio --sort dso 2>/dev/null | grep -E "^ +[0-9]" | head -8
+          $P report -i /tmp/perf.data --stdio --sort dso,sym 2>/dev/null | grep -E "^ +[0-9]" | cut -c1-160 | head -40
+          $P report -i /tmp/perf.data --stdio --sort srcline 2>/dev/null | grep -E "^ +[0-9]" | head -50
