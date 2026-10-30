@@ -11,6 +11,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 4 | Country index from a 26^3 table (a code is a base-26 number, so number order is byte order) instead of sorting 200,000 codes: the regions phase was 16 ms of single-threaded work on the PC, before any parallel part. Linux A/B 299.2 → 280.5 ms (−6 %); the board gained more, its 12 threads wait on serial work (commit ca4391b) | run-53fbc2a217df | 0.0816 | 18.0 | 66.02 |
 | 5 | SWAR number parse: eight digits at once (a digit has bit 4 set; `,` `.` CR LF have it clear), for the id, the region id, the amount and the regions file. PC 92–107 → 77.5 ms on full, 18.5 → 13.6 ms on sample (commit a990d8a) | run-5e2036e1e69a | 0.0739 | 17.7 | 67.11 |
 | — | PGO (training on 1.8 MB of the seed-2 sample, CRLF kept): board 0.0821 s, no gain; reverted | run-742f1717b622 | 0.0821 | 17.6 | 66.06 |
+| 6 | No quote-counting pass: chunk starts from the section 2.2 guarantee (an LF followed by a digit or a BOM byte ends a record). PC 77.5 → 76.3 ms; one read of 202 MB less on the board | | | | |
 
 ## Correctness checks
 

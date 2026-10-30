@@ -174,28 +174,14 @@ fn main() {
     }
     let d = load(&format!("{din}/records.csv"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
-    // A '"' never occurs outside a quoted field, so "inside quotes" at p is the parity of the quotes
-    // before p. Each chunk starts after the first LF outside quotes at or after its nominal start.
-    let nom: Vec<usize> = (0..=nt).map(|k| k * d.len() / nt).collect();
-    let quotes: Vec<usize> = thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt)
-            .map(|k| {
-                let c = &d[nom[k]..nom[k + 1]];
-                sc.spawn(move || c.chunks(32).map(|x| x.iter().map(|&b| (b == b'"') as u8).sum::<u8>() as usize).sum())
-            })
-            .collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+    // Chunk starts without a pass over the file: by section 2.2 a note is lowercase words (an LF in it is
+    // followed by a letter, a quote or a space-free word) and a name has no LF, so an LF followed by a digit
+    // or by the first byte of a BOM always ends a record.
     let mut bs = vec![d.iter().position(|&c| c == b'\n').map_or(d.len(), |x| x + 1)]; // after the header
-    let mut inside = 0;
     for k in 1..nt {
-        inside ^= quotes[k - 1] & 1;
-        let (mut q, mut ins) = (nom[k], inside);
-        while q < d.len() && (d[q] != b'\n' || ins == 1) {
-            ins ^= (d[q] == b'"') as usize;
-            q += 1;
-        }
-        bs.push((q + 1).min(d.len()).max(bs[k - 1]));
+        let from = (k * d.len() / nt).max(bs[k - 1]).max(1);
+        let start = (from..d.len()).find(|&i| d[i - 1] == b'\n' && (d[i].is_ascii_digit() || d[i] == 0xEF));
+        bs.push(start.unwrap_or(d.len()));
     }
     bs.push(d.len());
     let (tab, arena, top) = (zeroed(SLOTS), zeroed(1 << 24), AtomicU64::new(0));

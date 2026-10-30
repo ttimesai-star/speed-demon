@@ -11,10 +11,12 @@ Rust, standard library only, one file (`src/main.rs`).
 
 1. **Regions.** `regions.csv` becomes a flat array from region id to country index; the country codes are
    sorted first, so the index order is the output order, and `_UNMATCHED` is the last index.
-2. **Chunks without guessing.** A `"` can only occur inside a quoted field (section 2.1), and every quoted
-   field holds an even number of them, so "inside quotes" at byte p is the parity of the quotes before p.
-   One parallel pass counts the quotes in each nominal chunk; from the prefix parity, each chunk start
-   moves to the first LF outside quotes. No speculative parsing and no repair step.
+2. **Chunks without a pre-pass.** Section 2.2, which the spec says may be relied on, fixes what the
+   generator writes: a note is lowercase words (after an LF inside it comes a letter or a quote), and a name
+   never contains an LF. So an LF followed by a digit or by the first byte of a BOM always ends a record, and
+   each chunk starts at the first such LF after its nominal start: a short local scan, no pass over the file.
+   (An earlier version counted the quotes of every chunk and used the parity; same chunks, one more read of
+   202 MB.)
 3. **Parse, all threads.** Each record is read byte by byte: an optional BOM, the id, two text fields
    (quoted: scan to the next `"`, a `""` pair counts as one byte; unquoted: up to the comma), the region id,
    the amount in integer cents, and CRLF or LF. `name_bytes` and `note_bytes` are the raw length minus the
