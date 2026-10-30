@@ -1,0 +1,41 @@
+# Official harness (run_submission.py) on a GitHub runner: T and M (memory.peak) for one track, seed 1 full.
+# Tooling outside track-*, not counted in S. Runs on dev-* pushes and by hand.
+name: sd-harness
+on:
+  push:
+    branches: ["dev-*"]
+  workflow_dispatch:
+    inputs:
+      track: { default: "a" }
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { repository: hackathon-raptors/speed-demon-2026, path: sd2026 }
+      - uses: actions/cache@v4
+        with:
+          path: data
+          key: sd-data-a-${{ hashFiles('sd2026/generators/**') }}
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - name: data + timer + docker cgroupfs
+        run: |
+          t=${{ inputs.track || 'a' }}
+          g=$(ls sd2026/generators/${t}_*.py)
+          [ -d data/full/$t ] || python3 "$g" --seed 1 --scale full --out data/full/$t
+          gcc -O2 -static -o sd-timer sd2026/harness/timer/sd-timer.c
+          sudo apt-get install -y -qq vmtouch >/dev/null || true
+          echo '{"exec-opts":["native.cgroupdriver=cgroupfs"]}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          nproc; lscpu | grep -E "Model name|^CPU\(s\)"
+      - name: run_submission (5 runs)
+        run: |
+          t=${{ inputs.track || 'a' }}
+          out=$(grep -P "^$t\tfull\t" tools/expected_hashes.tsv | cut -f4)
+          exp=$(grep -P "^$t\tfull\t" tools/expected_hashes.tsv | cut -f5)
+          sudo -E env PATH="$PATH" python3 sd2026/harness/run_submission.py --context track-$t --track $t \
+            --data data/full/$t --output $out --expected-sha256 $exp --timeout-s 600 \
+            --timer ./sd-timer --cpuset 0-3 --work /tmp/sdw --results result.json || true
+          cat result.json | tee -a "$GITHUB_STEP_SUMMARY"
