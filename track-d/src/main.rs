@@ -63,69 +63,52 @@ fn edges(d: &[u8], a: usize, b: usize, mut f: impl FnMut(usize, usize, u32)) {
     }
 }
 
-// One half of a bidirectional Dijkstra search: u32 distances in a hash table, touched slots, heap of
-// dist << 32 | node.
+// One half of a bidirectional Dijkstra search: u32 distances, touched nodes, heap of dist << 32 | node.
 struct Side {
-    t: Vec<u64>, // open addressing, (node + 1) << 32 | dist, 0 = empty
+    d: Vec<u32>,
     seen: Vec<u32>,
     h: BinaryHeap<Reverse<u64>>,
 }
 
-const TB: usize = 1 << 18; // slots per half; a search that would fill half of them goes to `wide`
-
 impl Side {
-    fn new() -> Side {
-        Side { t: vec![0; TB], seen: vec![], h: BinaryHeap::new() }
+    fn new(n: usize) -> Side {
+        Side { d: vec![u32::MAX; n], seen: vec![], h: BinaryHeap::new() }
     }
     fn top(&self) -> u64 {
         self.h.peek().map_or(u64::MAX, |r| r.0 >> 32)
     }
-    // The slot of node v, or the empty slot where it would go. Ids are BFS-local, so v itself is the hash.
-    fn find(&self, v: usize) -> usize {
-        let mut i = v & (TB - 1);
-        while self.t[i] != 0 && (self.t[i] >> 32) as usize != v + 1 {
-            i = (i + 1) & (TB - 1);
-        }
-        i
-    }
-    fn get(&self, v: usize) -> u64 {
-        match self.t[self.find(v)] {
-            0 => u64::MAX,
-            e => e as u32 as u64,
-        }
-    }
     fn start(&mut self, s: usize) {
-        let i = self.find(s);
-        (self.t[i] = (s as u64 + 1) << 32, self.seen.push(i as u32), self.h.push(Reverse(s as u64)));
+        (self.d[s] = 0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
     }
     // Settles the nearest node; `best` takes its sum with the other half's label (checking at settle time
-    // is enough for the stop rule top + top >= best). False if a sum does not fit in u32 (the weights near
-    // 2^32 on the special nodes) or the table is half full: the query then goes to `wide`.
-    fn step(&mut self, off: &[u32], adj: &[(u32, u32)], other: &Side, best: &mut u64) -> bool {
+    // is enough for the stop rule top + top >= best). False if a sum does
+    // not fit in u32 (the weights near 2^32 on the special nodes): the query then goes to `wide`.
+    fn step(&mut self, off: &[u32], adj: &[(u32, u32)], other: &[u32], best: &mut u64) -> bool {
         let Reverse(e) = self.h.pop().unwrap();
         let (du, u) = (e >> 32, e as u32 as usize);
-        if du > self.t[self.find(u)] as u32 as u64 {
+        if du > self.d[u] as u64 {
             return true;
         }
-        *best = (*best).min(du.saturating_add(other.get(u)));
+        if other[u] != u32::MAX {
+            *best = (*best).min(du + other[u] as u64);
+        }
         for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
             let (v, nd) = (v as usize, du + w as u64);
-            let i = self.find(v);
-            if nd >= u32::MAX as u64 || self.t[i] == 0 && self.seen.len() >= TB / 2 {
+            if nd >= u32::MAX as u64 {
                 return false;
             }
-            if self.t[i] == 0 || nd < self.t[i] as u32 as u64 {
-                if self.t[i] == 0 {
-                    self.seen.push(i as u32);
+            if nd < self.d[v] as u64 {
+                if self.d[v] == u32::MAX {
+                    self.seen.push(v as u32);
                 }
-                (self.t[i] = (v as u64 + 1) << 32 | nd, self.h.push(Reverse(nd << 32 | v as u64)));
+                (self.d[v] = nd as u32, self.h.push(Reverse(nd << 32 | v as u64)));
             }
         }
         true
     }
     fn reset(&mut self) {
-        for &i in &self.seen {
-            self.t[i as usize] = 0;
+        for &v in &self.seen {
+            self.d[v as usize] = u32::MAX;
         }
         (self.seen.clear(), self.h.clear());
     }
@@ -190,50 +173,6 @@ fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>]) -> (Vec<u32>, Vec<(u32, u3
     off.copy_within(1.., 0); // off[x + 1] held the start of x
     off[n] = adj.len() as u32;
     (off, adj)
-}
-
-// Reverse CSR without a copy of the edges: thread k scans every edge twice (count, then fill) and keeps
-// the heads in its range [k * c, (k + 1) * c).
-fn rev(n: usize, nt: usize, off: &[u32], adj: &[(u32, u32)]) -> (Vec<u32>, Vec<(u32, u32)>) {
-    let c = n.div_ceil(nt);
-    let mut roff = vec![0u32; n + 1];
-    fn scan(n: usize, c: usize, k: usize, off: &[u32], adj: &[(u32, u32)], mut f: impl FnMut(usize, usize, u32)) {
-        for u in 0..n {
-            for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
-                if v as usize / c == k {
-                    f(v as usize - k * c, u, w);
-                }
-            }
-        }
-    }
-    thread::scope(|sc| {
-        for (k, o) in roff[1..].chunks_mut(c).enumerate() {
-            sc.spawn(move || scan(n, c, k, off, adj, |i, _, _| o[i] += 1));
-        }
-    });
-    let sizes: Vec<usize> = roff[1..].chunks(c).map(|o| o.iter().map(|&x| x as usize).sum()).collect();
-    let mut radj = vec![(0u32, 0u32); adj.len()];
-    thread::scope(|sc| {
-        let (mut rest, mut base) = (&mut radj[..], 0);
-        for (k, o) in roff[1..].chunks_mut(c).enumerate() {
-            let (a, r) = std::mem::take(&mut rest).split_at_mut(sizes[k]);
-            rest = r;
-            sc.spawn(move || {
-                let mut s = base as u32;
-                for x in o.iter_mut() {
-                    (s += *x, *x = s);
-                }
-                scan(n, c, k, off, adj, |i, u, w| {
-                    o[i] -= 1;
-                    a[o[i] as usize - base] = (u as u32, w);
-                });
-            });
-            base += sizes[k];
-        }
-    });
-    roff.copy_within(1.., 0);
-    roff[n] = adj.len() as u32;
-    (roff, radj)
 }
 
 fn main() {
@@ -319,8 +258,18 @@ fn main() {
     });
     drop((off, adj));
     let (off, adj) = (off2, adj2);
-    let (roff, radj) = rev(n, nt, &off, &adj);
-    drop(ord);
+    // Reverse CSR for the backward half of the search, the same way.
+    let parts = par(nt, |t| {
+        let mut l: Vec<Vec<_>> = (0..nt).map(|_| Vec::with_capacity(adj.len() / nt / nt * 9 / 8)).collect();
+        for u in t * n / nt..(t + 1) * n / nt {
+            for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
+                l[v as usize / c].push((v, u as u32, w));
+            }
+        }
+        l
+    });
+    let (roff, radj) = csr(n, &parts);
+    drop((parts, ord));
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
     while p < q.len() {
@@ -334,7 +283,7 @@ fn main() {
         for _ in 0..nt {
             let (qs, ans, next) = (&qs, &ans, &next);
             sc.spawn(move || {
-                let (mut f, mut b) = (Side::new(), Side::new());
+                let (mut f, mut b) = (Side::new(n), Side::new(n));
                 loop {
                     let i = next.fetch_add(1, Relaxed);
                     let Some(&(s, t)) = qs.get(i) else { break };
@@ -349,8 +298,8 @@ fn main() {
                                 break;
                             }
                             let ok = match x <= y {
-                                true => f.step(off, adj, &b, &mut best),
-                                false => b.step(roff, radj, &f, &mut best),
+                                true => f.step(off, adj, &b.d, &mut best),
+                                false => b.step(roff, radj, &f.d, &mut best),
                             };
                             if !ok {
                                 best = wide(off, adj, s, t);
