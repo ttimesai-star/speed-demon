@@ -129,15 +129,6 @@ fn name_id(tab: &[AtomicU64], arena: &[AtomicU64], top: &AtomicU64, d: &[u8], s:
     }
 }
 
-// Runs f(0..nt) on nt threads and returns the results in thread order.
-fn par<T: Send>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    let f = &f;
-    thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|t| sc.spawn(move || f(t))).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    })
-}
-
 #[derive(Clone, Copy)]
 struct Agg {
     count: i64,
@@ -159,40 +150,31 @@ fn money(out: &mut Vec<u8>, c: i64) {
 fn main() {
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
-    let nt = thread::available_parallelism().map_or(12, |n| n.get());
     // regions.csv: region id -> country index, countries in byte order. A code is a base-26 number, so the
-    // order of the numbers is the byte order and a 26^3 table replaces a sort. Two parallel passes over the
-    // mapped file, one chunk of rows per thread: mark the codes, then fill the map.
+    // order of the numbers is the byte order and a 26^3 table replaces a sort. Two passes over the mapped
+    // file instead of a list of rows.
     let r = load(&format!("{din}/regions.csv"));
-    let h = r.iter().position(|&c| c == b'\n').unwrap() + 1;
-    let mut rb: Vec<usize> = (0..=nt).map(|k| h + k * (r.len() - h) / nt).collect();
-    for b in &mut rb[1..nt] {
-        while r[*b - 1] != b'\n' {
-            *b += 1; // to a line start
-        }
-    }
-    let rows = |k: usize, f: &mut dyn FnMut(usize, usize)| {
-        let mut p = rb[k];
-        while p < rb[k + 1] {
+    let rows = |f: &mut dyn FnMut(usize, usize)| {
+        let mut p = r.iter().position(|&c| c == b'\n').unwrap() + 1;
+        while p < r.len() {
             let id = num(r, &mut p) as usize;
             (f(id, r[p + 1..p + 4].iter().fold(0, |k, &c| k * 26 + (c - b'A') as usize)), p += 5);
         }
     };
-    let marks = par(nt, |k| {
-        let (mut m, mut top) = (vec![false; 26 * 26 * 26], 0);
-        rows(k, &mut |id, key| (m[key] = true, top = top.max(id)).1);
-        (m, top)
-    });
-    let (mut idx, mut codes) = (vec![0u16; 26 * 26 * 26], vec![]);
-    for key in (0..idx.len()).filter(|&key| marks.iter().any(|m| m.0[key])) {
-        (idx[key] = codes.len() as u16, codes.push([key / 676, key / 26 % 26, key % 26].map(|x| b'A' + x as u8)));
+    let (mut idx, mut top) = (vec![u16::MAX; 26 * 26 * 26], 0);
+    rows(&mut |id, key| (idx[key] = 0, top = top.max(id)).1);
+    let mut codes = vec![];
+    for key in 0..idx.len() {
+        if idx[key] == 0 {
+            (idx[key] = codes.len() as u16, codes.push([key / 676, key / 26 % 26, key % 26].map(|x| b'A' + x as u8)));
+        }
     }
     let nc = codes.len(); // index nc is _UNMATCHED
     assert!(nc < 256);
-    let mut country = vec![nc as u8; marks.iter().map(|m| m.1).max().unwrap_or(0) + 1];
-    let (cp, idx) = (country.as_mut_ptr() as usize, &idx);
-    par(nt, |k| rows(k, &mut |id, key| unsafe { *(cp as *mut u8).add(id) = idx[key] as u8 }));
+    let mut country = vec![nc as u8; top + 1];
+    rows(&mut |id, key| country[id] = idx[key] as u8);
     let d = load(&format!("{din}/records.csv"));
+    let nt = thread::available_parallelism().map_or(12, |n| n.get());
     // Chunk starts without a pass over the file: by section 2.2 a note is lowercase words (an LF in it is
     // followed by a letter, a quote or a space-free word) and a name has no LF, so an LF followed by a digit
     // or by the first byte of a BOM always ends a record.
@@ -206,7 +188,10 @@ fn main() {
     let (tab, arena, top) = (zeroed(SLOTS), zeroed(1 << 24), AtomicU64::new(0));
     let seen = zeroed((nc + 1) * IDS / 64);
     let (bs, country, top) = (&bs, &country, &top);
-    let parts: Vec<Vec<Agg>> = par(nt, |k| {
+    let parts: Vec<Vec<Agg>> = thread::scope(|sc| {
+        let hs: Vec<_> = (0..nt)
+            .map(|k| {
+                sc.spawn(move || {
                     let mut agg = vec![ZERO; nc + 1];
                     let (mut pend, mut bit) = (None, None);
                     let set = |(k, b): (usize, u64)| {
@@ -258,6 +243,10 @@ fn main() {
                     pend.map(&mut mark);
                     bit.map(set);
                     agg
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     assert!(((top.load(Relaxed) & 0xFFFFF) as usize) < IDS && (top.load(Relaxed) >> 20) < 1 << 24);
     let mut out = Vec::new();
