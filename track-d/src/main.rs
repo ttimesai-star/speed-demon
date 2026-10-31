@@ -77,6 +77,24 @@ impl Labels {
     }
 }
 
+// A search graph: offsets, edges as head | weight << .3 (the head takes .3 bits; a weight that does not fit
+// leaves the field's top value and is kept exact in .2, sorted by edge position). Weights are mostly below
+// 2^11 and n is below 2^21 at full scale, so an edge is 4 bytes instead of 8.
+struct G(Vec<u32>, Vec<u32>, Vec<(u32, u32)>, u32);
+
+impl G {
+    fn row(&self, u: usize) -> std::ops::Range<usize> {
+        self.0[u] as usize..self.0[u + 1] as usize
+    }
+    // Heads and weights of u's edges.
+    fn edges(&self, u: usize) -> impl Iterator<Item = (usize, u64)> + '_ {
+        let (r, top) = (self.row(u), u32::MAX >> self.3);
+        let big = |j: usize| self.2[self.2.binary_search_by_key(&(j as u32), |b| b.0).unwrap()].1;
+        let w = move |j: usize, x: u32| if x >> self.3 == top { big(j) } else { x >> self.3 };
+        r.clone().zip(&self.1[r]).map(move |(j, &x)| ((x & (1 << self.3) - 1) as usize, w(j, x) as u64))
+    }
+}
+
 // One half of a bidirectional Dijkstra search: .0 = 0 forward, 1 backward, .1 the touched nodes, .2 a heap
 // of dist << 32 | node. Both halves' u32 labels share one pair per node, so the meeting check at a settled
 // node reads the cache line its own label is in.
@@ -93,7 +111,7 @@ impl Side {
     // Settles the nearest node; `best` takes its sum with the other half's label (checking at settle time
     // is enough for the stop rule top + top >= best). False if a sum does not fit in u32 (the weights near
     // 2^32 on the special nodes): the query then goes to `wide`.
-    fn step(&mut self, off: &[u32], adj: &[(u32, u32)], d: &mut Labels, best: &mut u64) -> bool {
+    fn step(&mut self, g: &G, d: &mut Labels, best: &mut u64) -> bool {
         let Reverse(e) = self.2.pop().unwrap();
         let (du, u, k) = (e >> 32, e as u32 as usize, self.0);
         let lu = d.get(u);
@@ -103,8 +121,8 @@ impl Side {
         if lu[1 - k] != NO {
             *best = (*best).min(du + lu[1 - k] as u64);
         }
-        for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
-            let (v, nd) = (v as usize, du + w as u64);
+        for (v, w) in g.edges(u) {
+            let nd = du + w;
             if nd >= NO as u64 {
                 return false;
             }
@@ -127,7 +145,7 @@ impl Side {
 }
 
 // The same search with u64 distances in a hash map, for the few queries whose sums pass 2^32 - 2.
-fn wide(off: &[u32], adj: &[(u32, u32)], s: usize, t: usize) -> u64 {
+fn wide(g: &G, s: usize, t: usize) -> u64 {
     let mut dist = HashMap::from([(s, 0u64)]);
     let mut heap = BinaryHeap::from([Reverse((0u64, s))]);
     while let Some(Reverse((du, u))) = heap.pop() {
@@ -137,8 +155,8 @@ fn wide(off: &[u32], adj: &[(u32, u32)], s: usize, t: usize) -> u64 {
         if du > dist[&u] {
             continue;
         }
-        for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
-            let (v, nd) = (v as usize, du + w as u64);
+        for (v, w) in g.edges(u) {
+            let nd = du + w;
             if dist.get(&v).map_or(true, |&x| nd < x) {
                 (dist.insert(v, nd), heap.push(Reverse((nd, v))));
             }
@@ -166,39 +184,60 @@ fn par<T: Send>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     })
 }
 
-// CSR from edge lists (tail, head, weight) cut by tail range: list k of every part holds the tails in
-// [k * c, (k + 1) * c), c = ceil(n / k_max). Thread k counts, sums and fills its own range.
-fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>]) -> (Vec<u32>, Vec<(u32, u32)>) {
-    let c = n.div_ceil(parts[0].len());
-    let sizes: Vec<usize> = (0..parts[0].len()).map(|k| parts.iter().map(|l| l[k].len()).sum()).collect();
+// Bits for values below x.
+fn bits(x: usize) -> u32 {
+    usize::BITS - x.max(2).wrapping_sub(1).leading_zeros()
+}
+
+// Packed CSR from the edge lists cut by tail range: part.0[k] holds, for the tails in [k * c, (k + 1) * c),
+// c = ceil(n / k_max), each edge as (tail - k * c) | head << ub | weight << (ub + vb), and part.1 the edges
+// whose weight does not fit there. Thread k counts, sums and fills its own range.
+fn csr(n: usize, parts: &[(Vec<Vec<u64>>, Vec<(u32, u32, u32)>)], vb: u32) -> G {
+    let (kk, top) = (parts[0].0.len(), u32::MAX >> vb);
+    let (c, ub) = (n.div_ceil(kk), bits(n.div_ceil(kk)));
+    let each = |k: usize, f: &mut dyn FnMut(usize, u32, u32)| {
+        for &x in parts.iter().flat_map(|p| &p.0[k]) {
+            f((x & (1 << ub) - 1) as usize, (x >> ub) as u32 & (1 << vb) - 1, (x >> ub >> vb) as u32);
+        }
+        for &(u, v, w) in parts.iter().flat_map(|p| &p.1).filter(|e| e.0 as usize / c == k) {
+            f(u as usize - k * c, v, w);
+        }
+    };
+    let big = |k: usize| parts.iter().flat_map(|p| &p.1).filter(|e| e.0 as usize / c == k).count();
+    let sizes: Vec<usize> = (0..kk).map(|k| parts.iter().map(|p| p.0[k].len()).sum::<usize>() + big(k)).collect();
     let mut off = vec![0u32; n + 1];
     let mut adj = Vec::with_capacity(sizes.iter().sum());
     unsafe { adj.set_len(sizes.iter().sum()) }; // every slot is written below
-    thread::scope(|sc| {
-        let (mut rest, mut base) = (&mut adj[..], 0);
+    let big = thread::scope(|sc| {
+        let (mut rest, mut base, mut hs) = (&mut adj[..], 0, vec![]);
         for (k, o) in off[1..].chunks_mut(c).enumerate() {
             let (a, r) = std::mem::take(&mut rest).split_at_mut(sizes[k]);
             rest = r;
-            sc.spawn(move || {
-                for &(u, _, _) in parts.iter().flat_map(|l| &l[k]) {
-                    o[u as usize - k * c] += 1;
-                }
+            hs.push(sc.spawn(move || {
+                each(k, &mut |u, _, _| o[u] += 1);
                 let mut s = base as u32;
                 for x in o.iter_mut() {
                     (s += *x, *x = s); // end of each node
                 }
-                for &(u, v, w) in parts.iter().flat_map(|l| &l[k]) {
-                    let j = &mut o[u as usize - k * c];
-                    *j -= 1; // ends up at the node's start
-                    a[*j as usize - base] = (v, w);
-                }
-            });
+                let mut big = vec![];
+                each(k, &mut |u, v, w| {
+                    o[u] -= 1; // ends up at the node's start
+                    a[o[u] as usize - base] = v | w.min(top) << vb;
+                    if w >= top {
+                        big.push((o[u], w));
+                    }
+                });
+                big
+            }));
             base += sizes[k];
         }
+        hs.into_iter().flat_map(|h| h.join().unwrap()).collect::<Vec<_>>()
     });
     off.copy_within(1.., 0); // off[x + 1] held the start of x
     off[n] = adj.len() as u32;
-    (off, adj)
+    let mut big = big;
+    big.sort_unstable();
+    G(off, adj, big, vb)
 }
 
 fn main() {
@@ -217,18 +256,23 @@ fn main() {
     bs.push(d.len());
     // Edges cut by tail range per thread, then a CSR built range by range: no atomic in either pass.
     let (c, bs, rng) = (n.div_ceil(nt), &bs, |t: usize| t * n / nt..(t + 1) * n / nt);
+    let (vb, ub) = (bits(n), bits(c));
     let parts = par(nt, |t| {
         let mut l: Vec<Vec<_>> = (0..nt).map(|_| Vec::with_capacity((bs[t + 1] - bs[t]) / 16 / nt)).collect();
-        let (mut p, e) = (bs[t], bs[t + 1]);
+        let (mut p, e, mut big) = (bs[t], bs[t + 1], vec![]);
         while p < e {
-            let (u, v, w) = (num(d, &mut p) as u32, num(d, &mut p) as u32, num(d, &mut p) as u32);
-            if u != v {
-                l[u as usize / c].push((u, v, w)); // a self-loop never shortens a path
+            let (u, v, w) = (num(d, &mut p) as usize, num(d, &mut p), num(d, &mut p));
+            if u == v as usize {
+                continue; // a self-loop never shortens a path
+            }
+            match w < 1 << (64 - ub - vb) {
+                true => l[u / c].push((u - u / c * c) as u64 | v << ub | w << ub << vb),
+                false => big.push((u as u32, v as u32, w as u32)),
             }
         }
-        l
+        (l, big)
     });
-    let (off, adj) = csr(n, &parts);
+    let g0 = csr(n, &parts, vb);
     drop(parts);
     // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
     // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
@@ -243,10 +287,10 @@ fn main() {
         while h < q.len() {
             let u = q[h] as usize;
             h += 1;
-            q.get(h + 4).map(|&x| adj.get(off[x as usize] as usize).map(pf)); // its offsets came with its push
-            for &(v, _) in &adj[off[u] as usize..off[u + 1] as usize] {
-                if own[v as usize].load(Relaxed) == 0 && claim(v as usize, t) {
-                    (q.push(v), pf(&off[v as usize]));
+            q.get(h + 4).map(|&x| g0.1.get(g0.0[x as usize] as usize).map(pf)); // offsets came with the push
+            for (v, _) in g0.edges(u) {
+                if own[v].load(Relaxed) == 0 && claim(v, t) {
+                    (q.push(v as u32), pf(&g0.0[v]));
                 }
             }
         }
@@ -271,7 +315,7 @@ fn main() {
         let deg = |i: usize| {
             let o = ord[i] as usize;
             unsafe { *(ip as *mut u32).add(o) = i as u32 };
-            off[o + 1] - off[o]
+            g0.0[o + 1] - g0.0[o]
         };
         rng(t).map(deg).collect::<Vec<u32>>()
     });
@@ -286,33 +330,37 @@ fn main() {
         }
     });
     drop(degs);
-    let mut adj2: Vec<(u32, u32)> = Vec::with_capacity(adj.len());
-    unsafe { adj2.set_len(adj.len()) }; // every slot is written below
+    let (m, top) = (g0.1.len(), u32::MAX >> vb);
+    let mut adj2: Vec<u32> = Vec::with_capacity(m);
+    unsafe { adj2.set_len(m) }; // every slot is written below
     let ap2 = adj2.as_mut_ptr() as usize;
-    par(nt, |t| {
+    let big = par(nt, |t| {
+        let mut big = vec![];
         for i in rng(t) {
             // Three stages ahead: the offsets of row i + 16, the edges of row i + 8, the new ids of row i + 4.
-            ord.get(i + 16).map(|&o| pf(&off[o as usize]));
-            ord.get(i + 8).map(|&o| adj.get(off[o as usize] as usize).map(pf));
-            if let Some(&o) = ord.get(i + 4) {
-                adj[off[o as usize] as usize..off[o as usize + 1] as usize].iter().for_each(|e| pf(&id[e.0 as usize]));
-            }
-            let o = ord[i] as usize;
-            for (k, &(v, w)) in adj[off[o] as usize..off[o + 1] as usize].iter().enumerate() {
-                unsafe { *(ap2 as *mut (u32, u32)).add(off2[i] as usize + k) = (id[v as usize], w) };
+            ord.get(i + 16).map(|&o| pf(&g0.0[o as usize]));
+            ord.get(i + 8).map(|&o| g0.1.get(g0.0[o as usize] as usize).map(pf));
+            ord.get(i + 4).map(|&o| g0.edges(o as usize).for_each(|(v, _)| pf(&id[v])));
+            for (k, (v, w)) in g0.edges(ord[i] as usize).enumerate() {
+                let j = off2[i] as usize + k;
+                unsafe { *(ap2 as *mut u32).add(j) = id[v] | (w as u32).min(top) << vb };
+                if w >= top as u64 {
+                    big.push((j as u32, w as u32));
+                }
             }
         }
+        big
     });
-    drop(off);
-    let (spare, (off, adj)) = (adj, (off2, adj2));
+    drop(g0);
+    let g = G(off2, adj2, big.concat(), vb);
     // Reverse CSR for the backward half of the search, in place of the old edge array (already faulted in:
     // fresh pages are costly on the box). In-degrees counted with atomics, their ends as a parallel prefix
     // sum, each edge placed at its head's end minus one: after the renumbering a head is near its tail, so
     // a thread working a range of tails mostly touches counters no other thread does.
     let r = zeroed(n + 1);
-    let row = |u: usize| adj[off[u] as usize..off[u + 1] as usize].iter().map(move |&(v, w)| (u, v, w));
-    let rows = |t: usize| rng(t).flat_map(row);
-    par(nt, |t| rows(t).for_each(|(_, v, _)| _ = r[v as usize].fetch_add(1, Relaxed)));
+    let gr = &g;
+    let rows = |t: usize| rng(t).flat_map(move |u| gr.edges(u).map(move |e| (u, e)));
+    par(nt, |t| rows(t).for_each(|(_, (v, _))| _ = r[v].fetch_add(1, Relaxed)));
     let sums = par(nt, |t| rng(t).map(|v| r[v].load(Relaxed)).sum::<u32>());
     par(nt, |t| {
         let mut a = sums[..t].iter().sum::<u32>();
@@ -321,17 +369,24 @@ fn main() {
             r[v].store(a, Relaxed);
         }
     });
-    let mut radj = spare;
-    radj.truncate(adj.len());
+    let mut radj: Vec<u32> = Vec::with_capacity(m);
+    unsafe { radj.set_len(m) }; // every slot is written below
     let rp = radj.as_mut_ptr() as usize;
-    par(nt, |t| {
-        for (u, v, w) in rows(t) {
-            let j = r[v as usize].fetch_sub(1, Relaxed) - 1;
-            unsafe { *(rp as *mut (u32, u32)).add(j as usize) = (u as u32, w) };
+    let mut big = par(nt, |t| {
+        let mut big = vec![];
+        for (u, (v, w)) in rows(t) {
+            let j = r[v].fetch_sub(1, Relaxed) - 1;
+            unsafe { *(rp as *mut u32).add(j as usize) = u as u32 | (w as u32).min(top) << vb };
+            if w >= top as u64 {
+                big.push((j, w as u32));
+            }
         }
-    });
-    r[n].store(adj.len() as u32, Relaxed);
-    let roff: Vec<u32> = r.into_iter().map(AtomicU32::into_inner).collect();
+        big
+    })
+    .concat();
+    big.sort_unstable();
+    r[n].store(m as u32, Relaxed);
+    let rg = G(r.into_iter().map(AtomicU32::into_inner).collect(), radj, big, vb);
     drop(ord);
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
@@ -353,7 +408,7 @@ fn main() {
             let ((s, t), mut best) = (qs[i], u64::MAX); // MAX: unreachable
             if s == t {
                 best = 0;
-            } else if roff[t] < roff[t + 1] && off[s] < off[s + 1] {
+            } else if !rg.row(t).is_empty() && !g.row(s).is_empty() {
                 (f.start(&mut d, s), b.start(&mut d, t));
                 loop {
                     let (x, y) = (f.top(), b.top());
@@ -361,11 +416,11 @@ fn main() {
                         break;
                     }
                     let ok = match x <= y {
-                        true => f.step(&off, &adj, &mut d, &mut best),
-                        false => b.step(&roff, &radj, &mut d, &mut best),
+                        true => f.step(&g, &mut d, &mut best),
+                        false => b.step(&rg, &mut d, &mut best),
                     };
                     if !ok {
-                        best = wide(&off, &adj, s, t);
+                        best = wide(&g, s, t);
                         break;
                     }
                 }

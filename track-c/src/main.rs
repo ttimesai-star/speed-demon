@@ -139,7 +139,7 @@ fn main() {
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     let (r, d) = (load(&format!("{din}/regions.csv")), load(&format!("{din}/records.csv")));
-    let nt = thread::available_parallelism().map_or(12, |n| n.get()).div_ceil(2); // experiment: one thread per core
+    let nt = thread::available_parallelism().map_or(12, |n| n.get());
     // Line starts after the header and near k / nt of each file. For records.csv without a pass over the file:
     // by section 2.2 a note is lowercase words (an LF in it is followed by a letter, a quote or a space-free
     // word) and a name has no LF, so an LF followed by a digit or by the first byte of a BOM ends a record.

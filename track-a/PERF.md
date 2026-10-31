@@ -133,3 +133,4 @@ The three percentile selects and the formatting are two thirds of the output pha
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 14 | Percentile selects from the bottom up: p50 over the group, p95 above it, p99 above that (about 1.55 n element visits instead of 2.9 n). Board 0.0358 s in a slow hour (the unchanged step-13 code ran 0.0361 s in the push before) (commit 53b727e) | run-a240f52461a1 | 0.0358 | 30.7 | 78.19 |
+| — | Each parse thread drops its pages of the input mapping when done (`MADV_DONTNEED`): T 0.0329 s, S 210 → 223, 78.99 points (commit 31d35cb) | run-3a49e8d76354 | 0.0329 | 30.1 | 78.99 |

@@ -13,7 +13,6 @@ type Hour = (Vec<u32>, Vec<u16>);
 
 extern "C" {
     fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-    fn madvise(a: *const u8, len: usize, advice: i32) -> i32;
     fn prctl(op: i32, ...) -> i32;
 }
 
@@ -67,13 +66,6 @@ fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
         }
         i = (i + 1) & (SLOTS - 1);
     }
-}
-
-// MADV_DONTNEED on the whole pages of d[a..b]: each parse thread unmaps its part of the input in parallel
-// instead of the process exit doing all of it in one thread (a key read later faults its page back in).
-fn drop_pages(d: &[u8], a: usize, b: usize) {
-    let (a, e) = (a.next_multiple_of(4096), b / 4096 * 4096);
-    unsafe { madvise(d.as_ptr().add(a.min(e)), e - a.min(e), 4) };
 }
 
 // Appends " x" in decimal.
@@ -151,7 +143,7 @@ fn main() {
     let (bs, tb) = (&bs, &tab);
     let parts: Vec<Vec<Hour>> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
-            .map(|t| sc.spawn(move || (parse(d, bs[t], bs[t + 1], tb), drop_pages(d, bs[t], bs[t + 1])).0))
+            .map(|t| sc.spawn(move || parse(d, bs[t], bs[t + 1], tb)))
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });

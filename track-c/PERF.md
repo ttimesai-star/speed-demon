@@ -24,6 +24,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 13 | The same logic written for fewer formatted lines: the aggregate as an `[i64; 7]` with one merge function, field lengths by arithmetic instead of `if`/`else`, one `zeroed` and one `pf` (prefetch) helper, the name table and arena in one allocation. S 368 → 288; PC timing unchanged (130.5 vs 130.1 ms on one thread) (commit 93bcecc) | run-5fb4ccfdd39e | 0.0547 | 13.5 | 71.71 |
 | — | Without `PR_SET_THP_DISABLE` (do 4 KB pages on the tables cost the board TLB misses?): T 0.0540 s, M 13.5 → 14.6 MB, no gain; the prctl stays (commit ade2053) | run-90a7a65bf1ff | 0.0540 | 14.6 | 71.53 |
 | 14 | Each thread drops its whole pages of the input mapping (`MADV_DONTNEED`) when its part is parsed: the unmapping runs in the 12 threads instead of in the process exit (~5.6 ms outside `main` in the step-9 profile) (commit 53b727e) | run-35f43149a29b | 0.0521 | 13.6 | 72.17 |
+| — | One thread per core (6 instead of 12): T 0.0656 s, much slower; the hyperthreads hide the cache misses (commit 31d35cb) | run-8e8483bdd36c | 0.0656 | 12.1 | 70.13 |
 
 ## Correctness checks
 
