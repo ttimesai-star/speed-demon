@@ -48,3 +48,10 @@ Correctness, every step: seed 1 sample and full (published hashes), seed 2 sampl
 Parse + degree count 177 ms, edge placement 420 ms, BFS 115 ms, renumbering 100 ms, reverse CSR 65 ms,
 queries 480 ms. `perf`: `Side::step` 33 %, the edge-placement closure 29 % (all of it on the
 `cur[u].fetch_add` line), parse 12 %. Step 4 removes every atomic RMW from the CSR builds.
+
+## Phase profile on the board (run-8b83ab14d7d5, commit b26840d, step 12 code)
+
+Phase times in µs since `main` in the name of an extra file in `/out` (the run fails on purpose; the distances
+were checked on the PC). 12 threads: parse done 14,461, first CSR 41,504, BFS order 60,929, new ids and offsets
+70,934, renumbered edges 91,263, reverse CSR 109,421, queries read 109,543, queries done 211,703, written 211,842;
+T 216.9 ms. Construction ~109 ms (the first CSR alone 27 ms), queries ~102 ms.

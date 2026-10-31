@@ -19,6 +19,7 @@ Every step from the reference to your final version, each with the live-board ru
 | — | Byte search for `"` and `,` 32 bytes at a time with AVX2, SWAR for the tail: PC 71.5 → 69.8 ms, board 0.0634 s, no gain (run-61208674b19c); reverted. Board runs of unchanged code now spread by up to 8 % (0.0625–0.0678 s) | run-61208674b19c | 0.0634 | 11.9 | 70.30 |
 | — | `regions.csv` in two parallel passes (one chunk of rows per thread) and the parse threads through a shared `par()`: board 0.0663 s with S +8 (run-ba02dfd218a5, 69.62 points), no visible gain within the spread; reverted to step 10 | run-ba02dfd218a5 | 0.0663 | 12.6 | 69.62 |
 | — | `prefetchw` (ET0 hint, `+prfchw`) for the bitset word, so the line is owned before its RMW: board 0.0654 s, within the spread of unchanged code (commit 43b86ce) | run-dd7960d78aca | 0.0654 | 12.5 | 69.87 |
+| 11 | Structure from 64-byte AVX2 masks: quote, comma and LF bits, a prefix XOR of the quote bits marks the quoted spans (a `""` pair flips twice), the separators are the commas and LFs outside them, four commas and then the LF per record, and the quote count of a field gives its `""` pairs; no byte-by-byte field scans. The name hash takes the length and the first 16 bytes (no loop), and `regions.csv` is parsed by all threads behind a barrier (codes present, then ranks into a 10^7-entry byte map, untouched pages cost nothing). PC single thread 153 → 127 ms. S 308 → 369 (commit b26840d) | run-c03fc1c7868e | 0.0560 | 12.8 | 70.87 |
 
 ## Correctness checks
 

@@ -114,3 +114,5 @@ run fails on purpose ("found [...]" in the public failure text), the summary its
 (first / median / last), regroup and endpoint order 20,337 µs, output workers end 27,784 / 28,558 / 29,899 µs,
 `main` returns at 29,966 µs; T 33.5 ms, so ~3.5 ms are process start and exit (unmapping the 239 MB input).
 Parse ~19 ms (228 thread-ms; the PC does it in 104 thread-ms), output ~9.5 ms.
+- **Endpoint keys copied to a compact arena, mmap kept** (commit b26840d): board 0.0327 s, M 29.2 MB, S 240:
+  78.95 points (run-49cc18208d58). No gain in T beyond the spread; S +30. Reverted.

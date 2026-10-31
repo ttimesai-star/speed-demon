@@ -19,7 +19,7 @@ fn load(path: &str) -> &'static [u8] {
 }
 
 
-const SLOTS: usize = 1 << 18; // name table; the generator's pool has 100,000 names (ids < 2^20)
+const SLOTS: usize = 1 << 17; // name table slots of 32 bytes; the generator's pool has 100,000 names (ids < 2^20)
 const IDS: usize = 1 << 20; // bits per country bitset, only the touched pages cost memory
 
 // Zeroed atomics from calloc'd memory, so untouched pages are never faulted in.
@@ -88,29 +88,32 @@ fn name_slot(d: &[u8], s: usize, n: usize) -> usize {
     (h >> 40) as usize & (SLOTS - 1)
 }
 
-// Dense id of the raw name d[s..s+n] whose first slot is i (see name_slot), shared by all threads. A new name
-// is copied to the arena first (two words at least), then published by CAS as arena offset << 36 | length << 20
-// | id (bit 63 set, 0 = empty slot).
+// Dense id of the raw name d[s..s+n] whose first slot is i (see name_slot), shared by all threads. A slot is
+// four words: the key arena offset << 36 | length << 20 | id (bit 63 set, 0 = empty, BUSY while being filled),
+// then the name's first 16 bytes; only a longer name's further words are in the arena. One cache line per
+// lookup for nine names in ten.
 fn name_id(tab: &[AtomicU64], arena: &[AtomicU64], top: &AtomicU64, d: &[u8], s: usize, n: usize, mut i: usize) -> u64 {
+    const BUSY: u64 = 1;
     let (w0, w1) = (nw(d, s, n, 0), nw(d, s, n, 1));
     loop {
-        let mut v = tab[i].load(Acquire);
-        if v == 0 {
-            let words = n.div_ceil(8).max(2) as u64;
+        let mut v = tab[4 * i].load(Acquire);
+        if v == 0 && tab[4 * i].compare_exchange(0, BUSY, Acquire, Relaxed).is_ok() {
+            let words = n.div_ceil(8).saturating_sub(2) as u64;
             let o = top.fetch_add(words << 20 | 1, Relaxed); // arena words << 20 | ids
             let (at, id) = ((o >> 20) as usize, (o & 0xFFFFF) + 1);
             for k in 0..words as usize {
-                arena[at + k].store(nw(d, s, n, k), Relaxed);
+                arena[at + k].store(nw(d, s, n, k + 2), Relaxed);
             }
-            let key = 1 << 63 | (at as u64) << 36 | (n as u64) << 20 | id;
-            match tab[i].compare_exchange(0, key, Release, Acquire) {
-                Ok(_) => return id,
-                Err(w) => v = w,
-            }
+            (tab[4 * i + 1].store(w0, Relaxed), tab[4 * i + 2].store(w1, Relaxed));
+            tab[4 * i].store(1 << 63 | (at as u64) << 36 | (n as u64) << 20 | id, Release);
+            return id;
+        }
+        while v <= BUSY {
+            v = tab[4 * i].load(Acquire); // lost the race for an empty slot: wait for its key
         }
         let (at, l) = ((v >> 36 & 0x7FF_FFFF) as usize, (v >> 20 & 0xFFFF) as usize);
-        if (l == n) & (arena[at].load(Relaxed) == w0) & (arena[at + 1].load(Relaxed) == w1)
-            && (2..n.div_ceil(8)).all(|k| arena[at + k].load(Relaxed) == nw(d, s, n, k))
+        if (l == n) & (tab[4 * i + 1].load(Relaxed) == w0) & (tab[4 * i + 2].load(Relaxed) == w1)
+            && (2..n.div_ceil(8)).all(|k| arena[at + k - 2].load(Relaxed) == nw(d, s, n, k))
         {
             return v & 0xFFFFF;
         }
@@ -167,7 +170,7 @@ fn main() {
         }
     };
     let (has, country) = (zeroed8(26 * 26 * 26), zeroed8(10_000_000));
-    let (tab, arena, top) = (zeroed(SLOTS), zeroed(1 << 24), AtomicU64::new(0));
+    let (tab, arena, top) = (zeroed(4 * SLOTS), zeroed(1 << 24), AtomicU64::new(0));
     let seen = zeroed(256 * IDS / 64);
     let (bs, top, rows, wait) = (&bs, &top, &rows, &std::sync::Barrier::new(nt));
     let parts: Vec<Vec<Agg>> = thread::scope(|sc| {
@@ -180,20 +183,14 @@ fn main() {
                     rows(k, &mut |id, key| country[id].store(rank[key], Relaxed));
                     wait.wait();
                     let mut agg = vec![ZERO; 256];
-                    let (mut pre, mut pend, mut bit) = (None, None, None);
-                    // Stage 1 of 4 is the slot's prefetch below; stage 2 prefetches the arena words of the name
-                    // that slot holds, so stage 3 compares cached bytes.
-                    let pre_arena = |i: usize| {
-                        let at = tab[i].load(Relaxed) >> 36 & 0x7FF_FFFF;
-                        unsafe { std::arch::x86_64::_mm_prefetch::<3>(arena.as_ptr().add(at as usize) as *const i8) };
-                    };
+                    let (mut pend, mut bit) = (None, None);
                     let set = |(k, b): (usize, u64)| {
                         if seen[k].load(Relaxed) & b == 0 {
                             seen[k].fetch_or(b, Relaxed);
                         }
                     };
-                    // Stage 3 of 4: the name's id, then a prefetch for writing of its word in the country's bitset; the
-                    // bit itself is set one record later (stage 4).
+                    // Stage 2 of 3: the name's id, then a prefetch for writing of its word in the country's bitset; the
+                    // bit itself is set one record later (stage 3).
                     let mut mark = |(ns, nn, i, g): (usize, usize, usize, usize)| {
                         let nid = if nn == 0 { 0 } else { name_id(tab, arena, top, d, ns, nn, i) } as usize;
                         let k = g * IDS / 64 + nid / 64;
@@ -222,14 +219,10 @@ fn main() {
                         (a.count += 1, a.ids += id, a.sum += amt);
                         (a.min = a.min.min(amt), a.max = a.max.max(amt));
                         (a.name_bytes += (nn - np) as i64, a.note_bytes += note as i64);
-                        // This record's slot is prefetched, the previous record's name has its arena words
-                        // prefetched, the one before it is looked up and marked for its country.
+                        // Stage 1: this record's slot is prefetched, the previous record's name is looked up.
                         let i = name_slot(d, ns, nn);
-                        unsafe { std::arch::x86_64::_mm_prefetch::<3>(tab.as_ptr().add(i) as *const i8) };
-                        if let Some(x) = pre.replace((ns, nn, i, g)) {
-                            pre_arena(x.2);
-                            pend.replace(x).map(&mut mark);
-                        }
+                        unsafe { std::arch::x86_64::_mm_prefetch::<3>(tab.as_ptr().add(4 * i) as *const i8) };
+                        pend.replace((ns, nn, i, g)).map(&mut mark);
                     };
                     // Structure 64 bytes at a time: a byte is inside quotes when an odd number of quotes precede
                     // it in the record (a "" pair flips twice), so the separators are the commas and LFs outside
@@ -260,7 +253,6 @@ fn main() {
                         q += left.count_ones();
                         blk += 64;
                     }
-                    pre.map(|x| pend.replace(x).map(&mut mark));
                     pend.map(&mut mark);
                     bit.map(set);
                     agg
