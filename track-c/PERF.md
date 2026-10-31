@@ -29,6 +29,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 16 | The regions pass marks a country code present only if it is not marked yet: all twelve threads were storing into the same few bytes, 200,000 times (commit 5764074) | run-8fc820d684fb | 0.0509 | 13.6 | 72.37 |
 | 17 | The first 16 name bytes are read once per record and carried through the pipeline: the hash and the compare share them (PC one thread 137.6 → 131.5 ms) (commit ba83278) | run-b2396887a6ba | 0.0484 | 13.6 | 72.90 |
 | 18 | Statically linked (`+crt-static` in `.cargo/config.toml`, no line of code) (commit 25001e9) | run-4632b89c3375 | 0.0482 | 13.2 | 73.08 |
+| 19 | The same logic written for fewer formatted lines (one-line imports, no long tuples or chains, `then` instead of `if`/`else`): S 297 → 263. Its first run took 0.0651 s in a slow push (the PC showed 2–4 %), the second 0.0481 s (commits 5c01b22, 652aa9f) | run-73829cd50880 | 0.0481 | 13.4 | 73.43 |
 
 ## Correctness checks
 

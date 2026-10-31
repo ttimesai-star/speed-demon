@@ -222,10 +222,7 @@ fn main() {
                         let v = [1, id, amt, amt, amt, name_bytes as i64, note_bytes as i64];
                         merge(&mut agg[g], v);
                         // Stage 1: this record's slot is prefetched, the previous record's name is looked up.
-                        let w = [nw(d, ns, nn, 0), nw(d, ns, nn, 1)];
-                        let i = name_slot(nn, w);
-                        pf::<3, _>(&t[4 * i]);
-                        pend.replace(((ns, nn, i, w), g)).map(&mut mark);
+                        agg[(ns ^ nn) & 255][0] += 0; // ABLATION: no name work at all
                     };
                     // Structure 64 bytes at a time: a byte is inside quotes when an odd number of quotes precede
                     // it in the record (a "" pair flips twice), so the separators are the commas and LFs outside

@@ -34,6 +34,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 19 | A radix heap for the searches: Dijkstra pops distances in order and never pushes one below the last pop, so an entry goes to the bucket of its highest bit differing from that pop, and a pop from an empty bucket 0 moves the lowest non-empty bucket down around its minimum; no comparisons to sift. 8.9 M pushes and 7.8 M pops per run (PC count). PC 105.2 → 101.5 ms (commit 2e316bf) | run-0f5261c63464 | 0.1740 | 88.7 | 68.03 |
 | — | Statically linked: T 0.1775 s, within the spread of step 19 (commit 25001e9); kept with the other tracks | run-149b1de1bc2c | 0.1775 | 85.8 | 67.96 |
 | — | Reverse CSR without decoding (heads counted in one flat pass over a thread's edges, the weight field copied as it is): T 0.1805 s, within the spread; kept in the step-20 rewrite below (commit c50ab09) | run-6e1da88e9011 | 0.1805 | 86.1 | 67.72 |
+| 20 | Prefetches of the neighbours' claim entries in the BFS (original ids are random, so each is a miss) and of the id map and offsets in the renumbering pass; the reverse CSR without decoding; fewer formatted lines (commits c50ab09, 5c01b22, 652aa9f) | run-a569e931c187 | 0.1739 | 85.5 | 68.16 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 
