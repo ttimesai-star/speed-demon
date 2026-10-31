@@ -20,7 +20,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 9 | S: unix-only `load`, a shorter `par()` (commit 1309be5) | run-17d166f4a76b | 0.2076 | 282.8 | 61.77 |
 | 10 | Both halves' labels in one array of `[u32; 2]`: the meeting check at a settled node reads the cache line of its own label. PC neutral (commit f651ca9, pushed as f9bb30a: 0.2045 s; same code again at 39f5587: 0.2009 s) | run-4060dd92a5fd | 0.2009 | 285.9 | 61.98 |
 | 11 | Less serial work: the leftover candidates found in parallel before the single-thread claim, the new offsets as a parallel prefix sum over per-thread degree chunks (commit 09a92cf, pushed as 2bf70a0) | run-9a0fbcc43821 | 0.1939 | 278.8 | 62.36 |
-| 12 | The BFS orders copied into place by one thread each instead of one `concat`, the id map allocated without a fill pass (every slot is written) | | | | |
+| — | The BFS orders copied into place by one thread each instead of one `concat`, the id map allocated without a fill pass (every slot is written): board 0.1950 s with S +14 (commit 8b7582b, pushed as 4496193, 62.18 points); reverted to step 11 | run-610877faa8d5 | 0.1950 | 278.9 | 62.18 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 
