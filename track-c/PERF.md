@@ -25,6 +25,7 @@ Every step from the reference to your final version, each with the live-board ru
 | — | Without `PR_SET_THP_DISABLE` (do 4 KB pages on the tables cost the board TLB misses?): T 0.0540 s, M 13.5 → 14.6 MB, no gain; the prctl stays (commit ade2053) | run-90a7a65bf1ff | 0.0540 | 14.6 | 71.53 |
 | 14 | Each thread drops its whole pages of the input mapping (`MADV_DONTNEED`) when its part is parsed: the unmapping runs in the 12 threads instead of in the process exit (~5.6 ms outside `main` in the step-9 profile) (commit 53b727e) | run-35f43149a29b | 0.0521 | 13.6 | 72.17 |
 | — | One thread per core (6 instead of 12): T 0.0656 s, much slower; the hyperthreads hide the cache misses (commit 31d35cb) | run-8e8483bdd36c | 0.0656 | 12.1 | 70.13 |
+| 15 | Bitset rows 2^20 bits plus eight cache lines apart: rows exactly 128 KB apart put the ~200 used lines of every country into the same ~200 of the 2,048 L2 sets (commit 19d3986, pushed as 71254f8) | run-2ce029eb3c87 | 0.0516 | 13.3 | 72.36 |
 
 ## Correctness checks
 

@@ -173,7 +173,7 @@ fn main() {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
                 sc.spawn(move || {
-                    rows(k, &mut |_, key| has[key].store(1, Relaxed));
+                    rows(k, &mut |_, key| _ = has[key].load(Relaxed) == 0 && { has[key].store(1, Relaxed); true });
                     wait.wait();
                     let rank: Vec<u8> = has.iter().scan(1, |n, h| Some((*n, *n += h.load(Relaxed)).0)).collect();
                     rows(k, &mut |id, key| country[id].store(rank[key], Relaxed));
