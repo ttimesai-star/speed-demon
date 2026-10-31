@@ -125,3 +125,5 @@ The three percentile selects and the formatting are two thirds of the output pha
 - **Percentile selects from the bottom up** (p50 over the group, p95 above it, p99 above that: about 1.55 n element
   visits instead of 2.9 n; commit 93bcecc): board 0.0361 s (run-edd1378a829e, 78.24 points), the other tracks ran
   ~3 % slow in the same push. No gain seen; reverted.
+- **Statically linked** (`+crt-static` in the Dockerfile's build flags; commit ade2053): board 0.0356 s
+  (run-aaf5865c346d, 78.42 points). Reverted.

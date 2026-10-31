@@ -4,6 +4,14 @@ use std::collections::{BinaryHeap, HashMap};
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::{env, fs, thread};
+static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static PH: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+fn us() -> u64 {
+    T0.get().unwrap().elapsed().as_micros() as u64
+}
+fn mark(k: usize) {
+    PH[k].fetch_max(us(), Relaxed);
+}
 
 fn load(path: &str) -> &'static [u8] {
     use std::os::unix::io::AsRawFd;
@@ -178,6 +186,7 @@ fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>]) -> (Vec<u32>, Vec<(u32, u3
                 for &(u, _, _) in parts.iter().flat_map(|l| &l[k]) {
                     o[u as usize - k * c] += 1;
                 }
+                mark(0);
                 let mut s = base as u32;
                 for x in o.iter_mut() {
                     (s += *x, *x = s); // end of each node
@@ -187,6 +196,7 @@ fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>]) -> (Vec<u32>, Vec<(u32, u3
                     *j -= 1; // ends up at the node's start
                     a[*j as usize - base] = (v, w);
                 }
+                mark(1);
             });
             base += sizes[k];
         }
@@ -197,6 +207,7 @@ fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>]) -> (Vec<u32>, Vec<(u32, u3
 }
 
 fn main() {
+    T0.set(std::time::Instant::now()).unwrap();
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     let d = load(&format!("{din}/graph.txt"));
@@ -223,7 +234,9 @@ fn main() {
         }
         l
     });
+    let tp = us();
     let (off, adj) = csr(n, &parts);
+    let tc = us();
     drop(parts);
     // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
     // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
@@ -245,10 +258,14 @@ fn main() {
             }
         }
     };
+    let tb0 = us();
     let mut lists = par(nt, |t| {
         let mut q = Vec::with_capacity(2 * n / nt);
-        (bfs(t * n / nt, t as u32, &mut q), q).1
+        let x = (bfs(t * n / nt, t as u32, &mut q), q).1;
+        mark(3);
+        x
     });
+    let tb1 = us();
     // The leftovers (nodes no BFS reached) are found in parallel, then claimed in one thread.
     let cand = par(nt, |t| rng(t).filter(|&r| own[r].load(Relaxed) == 0).collect::<Vec<_>>());
     let mut rest = vec![];
@@ -256,6 +273,7 @@ fn main() {
         bfs(r, nt as u32, &mut rest);
     }
     lists.push(rest);
+    let tb2 = us();
     let ord: Vec<u32> = lists.concat();
     drop((lists, own));
     // New id of each node and the degrees in the new order, then the offsets, in parallel by position.
@@ -269,6 +287,7 @@ fn main() {
         };
         rng(t).map(deg).collect::<Vec<u32>>()
     });
+    let tdeg = us();
     let mut off2 = vec![0u32; n + 1];
     let o2 = off2.as_mut_ptr() as usize;
     let base: Vec<u32> = degs.iter().scan(0, |a, c| (*a, *a += c.iter().sum::<u32>()).0.into()).collect();
@@ -291,6 +310,7 @@ fn main() {
             }
         }
     });
+    let tadj = us();
     drop(off);
     let (spare, (off, adj)) = (adj, (off2, adj2));
     // Reverse CSR for the backward half of the search, in place of the old edge array (already faulted in:
@@ -321,6 +341,7 @@ fn main() {
     r[n].store(adj.len() as u32, Relaxed);
     let roff: Vec<u32> = r.into_iter().map(AtomicU32::into_inner).collect();
     drop(ord);
+    let trev = us();
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
     while p < q.len() {
@@ -331,6 +352,7 @@ fn main() {
     let ans: Vec<AtomicU64> = qs.iter().map(|_| AtomicU64::new(0)).collect();
     // Queries taken in the order of their sources' new ids: searches that run at the same time work on
     // nearby parts of the graph, which the shared cache then holds for all of them.
+    let tq0 = us();
     let mut qo: Vec<usize> = (0..qs.len()).collect();
     qo.sort_unstable_by_key(|&i| qs[i]);
     let next = AtomicUsize::new(0);
@@ -362,6 +384,7 @@ fn main() {
             ans[i].store(best, Relaxed);
         }
     });
+    let tq1 = us();
     let mut out = Vec::with_capacity(qs.len() * 12);
     for a in &ans {
         match a.load(Relaxed) {
@@ -371,4 +394,7 @@ fn main() {
     }
     fs::create_dir_all(&dout).unwrap();
     fs::write(format!("{dout}/distances.txt"), out).unwrap();
+    let ph: Vec<u64> = PH.iter().map(|x| x.load(Relaxed)).collect();
+    let name = format!("D3_p{tp}_cnt{}_pl{}_c{tc}_b0{tb0}_bfs{}_b1{tb1}_left{tb2}_deg{tdeg}_adj{tadj}_rev{trev}_q{tq0}-{tq1}_w{}", ph[0], ph[1], ph[3], us());
+    fs::write(format!("{dout}/{name}"), b"").unwrap();
 }

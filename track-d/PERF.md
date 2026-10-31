@@ -25,6 +25,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 12 | Memory: the parts (edges bucketed by tail) are freed right after the first CSR, and the reverse CSR is built in the old edge array from atomic in-degree counts (ends as a parallel prefix sum, each edge placed at its head's end minus one; after the renumbering a head is near its tail, so threads rarely share a counter); paged labels from the step before. PC: peak 267 → 210 MB with the 92 MB file read (Windows), 117 → 115 ms. Board: M 279 → 139 MB, T 0.2136 s (commit 3343b2c) | run-783c571ed206 | 0.2136 | 138.8 | 63.92 |
 | 13 | Queries taken in the order of their sources' new ids, so the searches that run at the same time work on nearby parts of the graph and share the L3 (commit eaa8061) | run-97a70a6e5921 | 0.2076 | 137.1 | 64.26 |
 | 14 | The same logic written for fewer formatted lines (tuple structs for the labels and the search halves, one range helper, the per-thread loops through `par`). S 429 → 363 (commit 93bcecc) | run-da19dbb800c2 | 0.2128 | 137.6 | 64.51 |
+| 15 | The claim map, the id map and the in-degree counters come zeroed from calloc (0 = unclaimed, else 1 + the thread) and the renumbered edge array is not filled: no 7 MB passes in one thread before the parallel work. PC: the claim map alone was 2.3 ms of one thread (commit ade2053) | run-d8c083ab0c7a | 0.2106 | 138.6 | 64.56 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 
