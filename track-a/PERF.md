@@ -102,3 +102,6 @@ Every A/B binary is run 15–21 times and each run's hash is recorded: one hash 
   1,728 separate large reservations cost more there than the small growing vectors. Reverted to step 13.
 - **`malloc_trim(0)` after every sixth hour of output**, so that freed records leave M while the output file grows:
   M 29.8 → 25.8 MB but T 0.0350 s (run-08f3b828211b, 79.12 points against 79.27). Reverted.
+- **pread in 128 KB blocks per thread instead of mmap**, endpoint keys copied to an arena (commit 43b86ce): board
+  0.0320 s, M 29.2 MB, but S 210 → 249: 79.07 points against 79.48 (run-d6231b519602). Faulting the mapping in is
+  not where the board loses time. Reverted.

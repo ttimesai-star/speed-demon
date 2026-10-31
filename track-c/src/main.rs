@@ -148,6 +148,8 @@ fn money(out: &mut Vec<u8>, c: i64) {
 }
 
 fn main() {
+    let t0 = std::time::Instant::now();
+    let us = || t0.elapsed().as_micros();
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     // regions.csv: region id -> country index, countries in byte order. A code is a base-26 number, so the
@@ -173,6 +175,7 @@ fn main() {
     assert!(nc < 256);
     let mut country = vec![nc as u8; top + 1];
     rows(&mut |id, key| country[id] = idx[key] as u8);
+    let tr = us();
     let d = load(&format!("{din}/records.csv"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
     // Chunk starts without a pass over the file: by section 2.2 a note is lowercase words (an LF in it is
@@ -185,22 +188,30 @@ fn main() {
         bs.push(start.unwrap_or(d.len()));
     }
     bs.push(d.len());
+    let tb = us();
     let (tab, arena, top) = (zeroed(SLOTS), zeroed(1 << 24), AtomicU64::new(0));
     let seen = zeroed((nc + 1) * IDS / 64);
     let (bs, country, top) = (&bs, &country, &top);
-    let parts: Vec<Vec<Agg>> = thread::scope(|sc| {
+    let parts: Vec<(Vec<Agg>, u128, u128)> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
                 sc.spawn(move || {
+                    let ts = us();
                     let mut agg = vec![ZERO; nc + 1];
-                    let (mut pend, mut bit) = (None, None);
+                    let (mut pre, mut pend, mut bit) = (None, None, None);
+                    // Stage 1 of 4 is the slot's prefetch below; stage 2 prefetches the arena words of the name
+                    // that slot holds, so stage 3 compares cached bytes.
+                    let pre_arena = |i: usize| {
+                        let at = tab[i].load(Relaxed) >> 36 & 0x7FF_FFFF;
+                        unsafe { std::arch::x86_64::_mm_prefetch::<3>(arena.as_ptr().add(at as usize) as *const i8) };
+                    };
                     let set = |(k, b): (usize, u64)| {
                         if seen[k].load(Relaxed) & b == 0 {
                             seen[k].fetch_or(b, Relaxed);
                         }
                     };
-                    // Stage 2 of 3: the name's id, then a prefetch for writing of its word in the country's bitset; the
-                    // bit itself is set one record later (stage 3).
+                    // Stage 3 of 4: the name's id, then a prefetch for writing of its word in the country's bitset; the
+                    // bit itself is set one record later (stage 4).
                     let mut mark = |(ns, nn, i, g): (usize, usize, usize, usize)| {
                         let nid = if nn == 0 { 0 } else { name_id(tab, arena, top, d, ns, nn, i) } as usize;
                         let k = g * IDS / 64 + nid / 64;
@@ -232,22 +243,29 @@ fn main() {
                         (a.count += 1, a.ids += id, a.sum += amt);
                         (a.min = a.min.min(amt), a.max = a.max.max(amt));
                         (a.name_bytes += (nn - np) as i64, a.note_bytes += (tn - tp) as i64);
-                        // A two-stage pipeline: this record's slot is prefetched, the previous record's name is
-                        // looked up (its slot is in cache by now) and marked for its country.
+                        // This record's slot is prefetched, the previous record's name has its arena words
+                        // prefetched, the one before it is looked up and marked for its country.
                         let i = name_slot(d, ns, nn);
                         unsafe { std::arch::x86_64::_mm_prefetch::<3>(tab.as_ptr().add(i) as *const i8) };
-                        if let Some(x) = pend.replace((ns, nn, i, g)) {
-                            mark(x);
+                        if let Some(x) = pre.replace((ns, nn, i, g)) {
+                            pre_arena(x.2);
+                            pend.replace(x).map(&mut mark);
                         }
                     }
+                    pre.map(|x| pend.replace(x).map(&mut mark));
                     pend.map(&mut mark);
                     bit.map(set);
-                    agg
+                    (agg, ts, us())
                 })
             })
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    let tj = us();
+    let mut st: Vec<u128> = parts.iter().map(|x| x.1).collect();
+    let mut en: Vec<u128> = parts.iter().map(|x| x.2).collect();
+    (st.sort(), en.sort());
+    let parts: Vec<Vec<Agg>> = parts.into_iter().map(|x| x.0).collect();
     assert!(((top.load(Relaxed) & 0xFFFFF) as usize) < IDS && (top.load(Relaxed) >> 20) < 1 << 24);
     let mut out = Vec::new();
     for g in 0..=nc {
@@ -268,6 +286,9 @@ fn main() {
         }
         writeln!(out, " {} {} {}", names, a.name_bytes, a.note_bytes).unwrap();
     }
+    let ta = us();
     fs::create_dir_all(&dout).unwrap();
     fs::write(format!("{dout}/aggregates.txt"), out).unwrap();
+    let name = format!("C_nt{nt}_r{tr}_b{tb}_s{}-{}_e{}-{}-{}_j{tj}_a{ta}_w{}", st[0], st[nt - 1], en[0], en[nt / 2], en[nt - 1], us());
+    fs::write(format!("{dout}/{name}"), b"").unwrap();
 }

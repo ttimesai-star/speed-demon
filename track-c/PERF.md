@@ -18,6 +18,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 10 | S: unix-only `load` (commit 1309be5) | run-8151737f38dd | 0.0625 | 12.5 | 70.36 |
 | — | Byte search for `"` and `,` 32 bytes at a time with AVX2, SWAR for the tail: PC 71.5 → 69.8 ms, board 0.0634 s, no gain (run-61208674b19c); reverted. Board runs of unchanged code now spread by up to 8 % (0.0625–0.0678 s) | run-61208674b19c | 0.0634 | 11.9 | 70.30 |
 | — | `regions.csv` in two parallel passes (one chunk of rows per thread) and the parse threads through a shared `par()`: board 0.0663 s with S +8 (run-ba02dfd218a5, 69.62 points), no visible gain within the spread; reverted to step 10 | run-ba02dfd218a5 | 0.0663 | 12.6 | 69.62 |
+| — | `prefetchw` (ET0 hint, `+prfchw`) for the bitset word, so the line is owned before its RMW: board 0.0654 s, within the spread of unchanged code (commit 43b86ce) | run-dd7960d78aca | 0.0654 | 12.5 | 69.87 |
 
 ## Correctness checks
 

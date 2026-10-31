@@ -174,13 +174,12 @@ fn par<T: Send>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
 
 // CSR from edge lists (tail, head, weight) cut by tail range: list k of every part holds the tails in
 // [k * c, (k + 1) * c), c = ceil(n / k_max). Thread k counts, sums and fills its own range.
-// adj is a buffer to reuse: its pages are already faulted in, and every slot is written below.
-fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>], mut adj: Vec<(u32, u32)>) -> (Vec<u32>, Vec<(u32, u32)>) {
+fn csr(n: usize, parts: &[Vec<Vec<(u32, u32, u32)>>]) -> (Vec<u32>, Vec<(u32, u32)>) {
     let c = n.div_ceil(parts[0].len());
     let sizes: Vec<usize> = (0..parts[0].len()).map(|k| parts.iter().map(|l| l[k].len()).sum()).collect();
     let mut off = vec![0u32; n + 1];
-    (adj.clear(), adj.reserve(sizes.iter().sum()));
-    unsafe { adj.set_len(sizes.iter().sum()) };
+    let mut adj = Vec::with_capacity(sizes.iter().sum());
+    unsafe { adj.set_len(sizes.iter().sum()) }; // every slot is written below
     thread::scope(|sc| {
         let (mut rest, mut base) = (&mut adj[..], 0);
         for (k, o) in off[1..].chunks_mut(c).enumerate() {
@@ -230,7 +229,8 @@ fn main() {
         edges(d, bs[t], bs[t + 1], |u, v, w| l[u / c].push((u as u32, v as u32, w)));
         l
     });
-    let (off, adj) = csr(n, &parts, vec![]);
+    let (off, adj) = csr(n, &parts);
+    drop(parts);
     // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
     // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
     let own: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(u32::MAX)).collect();
@@ -306,24 +306,33 @@ fn main() {
     });
     drop(off);
     let (spare, (off, adj)) = (adj, (off2, adj2));
-    // Reverse CSR for the backward half of the search, the same way, in the forward pass's buckets and edge
-    // array (already faulted in: fresh pages are costly on the box).
-    let mut parts = parts;
-    thread::scope(|sc| {
-        for (t, l) in parts.iter_mut().enumerate() {
-            let (adj, off) = (&adj, &off);
-            sc.spawn(move || {
-                l.iter_mut().for_each(Vec::clear);
-                for u in t * n / nt..(t + 1) * n / nt {
-                    for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
-                        l[v as usize / c].push((v, u as u32, w));
-                    }
-                }
-            });
+    // Reverse CSR for the backward half of the search, in place of the old edge array (already faulted in:
+    // fresh pages are costly on the box). In-degrees counted with atomics, their ends as a parallel prefix
+    // sum, each edge placed at its head's end minus one: after the renumbering a head is near its tail, so
+    // a thread working a range of tails mostly touches counters no other thread does.
+    let r: Vec<AtomicU32> = (0..=n).map(|_| AtomicU32::new(0)).collect();
+    let rows = |t: usize| (t * n / nt..(t + 1) * n / nt).flat_map(|u| adj[off[u] as usize..off[u + 1] as usize].iter().map(move |&(v, w)| (u, v as usize, w)));
+    par(nt, |t| rows(t).for_each(|(_, v, _)| _ = r[v].fetch_add(1, Relaxed)));
+    let sums = par(nt, |t| (t * n / nt..(t + 1) * n / nt).map(|v| r[v].load(Relaxed)).sum::<u32>());
+    par(nt, |t| {
+        let mut a = sums[..t].iter().sum::<u32>();
+        for v in t * n / nt..(t + 1) * n / nt {
+            a += r[v].load(Relaxed);
+            r[v].store(a, Relaxed);
         }
     });
-    let (roff, radj) = csr(n, &parts, spare);
-    drop((parts, ord));
+    let mut radj = spare;
+    radj.truncate(adj.len());
+    let rp = radj.as_mut_ptr() as usize;
+    par(nt, |t| {
+        for (u, v, w) in rows(t) {
+            let j = r[v].fetch_sub(1, Relaxed) - 1;
+            unsafe { *(rp as *mut (u32, u32)).add(j as usize) = (u as u32, w) };
+        }
+    });
+    r[n].store(adj.len() as u32, Relaxed);
+    let roff: Vec<u32> = r.into_iter().map(AtomicU32::into_inner).collect();
+    drop(ord);
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
     while p < q.len() {

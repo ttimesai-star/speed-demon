@@ -21,6 +21,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 10 | Both halves' labels in one array of `[u32; 2]`: the meeting check at a settled node reads the cache line of its own label. PC neutral (commit f651ca9, pushed as f9bb30a: 0.2045 s; same code again at 39f5587: 0.2009 s) | run-4060dd92a5fd | 0.2009 | 285.9 | 61.98 |
 | 11 | Less serial work: the leftover candidates found in parallel before the single-thread claim, the new offsets as a parallel prefix sum over per-thread degree chunks (commit 09a92cf, pushed as 2bf70a0) | run-9a0fbcc43821 | 0.1939 | 278.8 | 62.36 |
 | — | The BFS orders copied into place by one thread each instead of one `concat`, the id map allocated without a fill pass (every slot is written): board 0.1950 s with S +14 (commit 8b7582b, pushed as 4496193, 62.18 points); reverted to step 11 | run-610877faa8d5 | 0.1950 | 278.9 | 62.18 |
+| — | Paged labels: each thread keeps a pool of 4 KB pages (512 nodes of `[u32; 2]`) and a directory per 512 nodes instead of n labels; a search touches a few hundred pages. M 279 → 252 MB (so the peak is in the build, not the searches), T 0.2103 s (+6 % against the best): 61.62 points (commit 43b86ce) | run-9c36700b81eb | 0.2103 | 252.2 | 61.62 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 
