@@ -116,3 +116,9 @@ run fails on purpose ("found [...]" in the public failure text), the summary its
 Parse ~19 ms (228 thread-ms; the PC does it in 104 thread-ms), output ~9.5 ms.
 - **Endpoint keys copied to a compact arena, mmap kept** (commit b26840d): board 0.0327 s, M 29.2 MB, S 240:
   78.95 points (run-49cc18208d58). No gain in T beyond the spread; S +30. Reverted.
+
+## Output-phase profile on the board (run-580150c4a611, commit eaa8061)
+
+Sums over the 12 output workers (µs), then the largest single worker: counting 7,223 / 695, scatter 16,041 /
+1,480, freeing the hour's records 3,237 / 517, select + format 60,377 / 5,396, writer lock + write 7,444 / 1,192.
+The three percentile selects and the formatting are two thirds of the output phase.

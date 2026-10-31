@@ -127,8 +127,6 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
 }
 
 fn main() {
-    let t0 = std::time::Instant::now();
-    let us = || t0.elapsed().as_micros();
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) }; // PR_SET_THP_DISABLE: small vectors, no 2 MB pages
@@ -165,9 +163,7 @@ fn main() {
     // One hour per step: counting sort of its records by slot, then three percentiles per group.
     let work = || {
         let (mut cnt, mut errs, mut lat) = (vec![0u32; SLOTS + 1], vec![0usize; SLOTS], vec![]);
-        let mut acc = [0u128; 5];
         while let h @ 0..HOURS = next.fetch_add(1, Relaxed) {
-            let x0 = us();
             let recs = std::mem::take(&mut *hours[h].lock().unwrap());
             (cnt.fill(0), errs.fill(0));
             for &m in recs.iter().flat_map(|r| &r.0) {
@@ -177,7 +173,6 @@ fn main() {
             for s in 0..SLOTS {
                 cnt[s + 1] += cnt[s];
             }
-            let x1 = us();
             let mut cur = cnt.clone();
             lat.resize(cnt[SLOTS] as usize, 0);
             for r in &recs {
@@ -188,9 +183,7 @@ fn main() {
                     (cur[g] += 1, j += big as usize);
                 }
             }
-            let x2 = us();
             drop(recs);
-            let x3 = us();
             let ah = 30 * 24 + 18 + h; // hours since 2026-10-00T00
             let nov = (ah / 24 > 31) as usize;
             let day = ah / 24 - 31 * nov;
@@ -206,10 +199,11 @@ fn main() {
                 if n <= 32 {
                     v.sort_unstable();
                 } else {
-                    // n >= 25 makes the three ranks distinct, so each select has a non-empty range
-                    v.select_nth_unstable(r[2]);
-                    v[..r[2]].select_nth_unstable(r[1]);
-                    v[..r[1]].select_nth_unstable(r[0]);
+                    // n >= 25 makes the three ranks distinct, so each select has a non-empty range. From the
+                    // bottom up: p95 is searched above p50, p99 above p95 (n + n / 2 + n / 20 element visits).
+                    v.select_nth_unstable(r[0]);
+                    v[r[0] + 1..].select_nth_unstable(r[1] - r[0] - 1);
+                    v[r[1] + 1..].select_nth_unstable(r[2] - r[1] - 1);
                 }
                 buf.extend_from_slice(label.as_bytes());
                 buf.extend_from_slice(ep(s));
@@ -219,7 +213,6 @@ fn main() {
                 }
                 buf.push(b'\n');
             }
-            let x4 = us();
             let mut g = ready.lock().unwrap();
             let (done, bufs) = &mut *g;
             bufs[h] = Some(buf);
@@ -227,21 +220,7 @@ fn main() {
                 (&f).write_all(&b).unwrap();
                 *done += 1;
             }
-            drop(g);
-            let x5 = us();
-            for (k, v) in [x1 - x0, x2 - x1, x3 - x2, x4 - x3, x5 - x4].into_iter().enumerate() {
-                acc[k] += v;
-            }
         }
-        acc
     };
-    let tw = us();
-    let accs: Vec<[u128; 5]> = thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|_| sc.spawn(&work)).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    let sum: Vec<u128> = (0..5).map(|k| accs.iter().map(|a| a[k]).sum()).collect();
-    let mx: Vec<u128> = (0..5).map(|k| accs.iter().map(|a| a[k]).max().unwrap()).collect();
-    let name = format!("A2_nt{nt}_w{tw}_x{}_count{}-{}_scat{}-{}_free{}-{}_selfmt{}-{}_lockwr{}-{}", us(), sum[0], mx[0], sum[1], mx[1], sum[2], mx[2], sum[3], mx[3], sum[4], mx[4]);
-    fs::write(format!("{dout}/{name}"), b"").unwrap();
+    thread::scope(|sc| (0..nt).for_each(|_| drop(sc.spawn(&work))));
 }

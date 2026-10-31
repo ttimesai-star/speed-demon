@@ -18,6 +18,8 @@ fn load(path: &str) -> &'static [u8] {
     unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), n, 1, 2, f.as_raw_fd(), 0), n) }
 }
 
+const NO: u32 = u32::MAX;
+const PG: usize = 512; // nodes per label page (4 KB of [u32; 2])
 
 // Eight bytes at d[p..], little-endian, zero-padded past the end of d.
 fn word(d: &[u8], p: usize) -> u64 {
@@ -47,105 +49,87 @@ fn num(d: &[u8], p: &mut usize) -> u64 {
     x
 }
 
-// Calls f(u, v, w) for every edge line in d[a..b] that is not a self-loop.
-fn edges(d: &[u8], a: usize, b: usize, mut f: impl FnMut(usize, usize, u32)) {
-    let mut p = a;
-    while p < b {
-        let (u, v, w) = (num(d, &mut p), num(d, &mut p), num(d, &mut p));
-        if u != v {
-            f(u as usize, v as usize, w as u32);
-        }
-    }
-}
-
-const PG: usize = 512; // nodes per label page (4 KB of [u32; 2])
-
-// Labels of both halves of a search, paged: dir[v / PG] is a page from this thread's pool or u32::MAX (every
-// label unset). A search touches a few hundred pages at most, so a thread keeps that, not n labels.
-struct Labels {
-    dir: Vec<u32>,
-    pages: Vec<[[u32; 2]; PG]>,
-    free: Vec<u32>,
-    used: Vec<u32>,
-}
+// Labels of both halves of a search, paged: .0[v / PG] is a page of .1 or NO (every label unset), .2 the
+// free pages, .3 the directory entries in use. A search touches a few hundred pages, so a thread keeps
+// that, not n labels.
+struct Labels(Vec<u32>, Vec<[[u32; 2]; PG]>, Vec<u32>, Vec<u32>);
 
 impl Labels {
     fn get(&self, v: usize) -> [u32; 2] {
-        match self.dir[v / PG] {
-            u32::MAX => [u32::MAX; 2],
-            p => self.pages[p as usize][v % PG],
+        match self.0[v / PG] {
+            NO => [NO; 2],
+            p => self.1[p as usize][v % PG],
         }
     }
     fn at(&mut self, v: usize) -> &mut [u32; 2] {
-        if self.dir[v / PG] == u32::MAX {
-            let p = self.free.pop().unwrap_or_else(|| (self.pages.push([[u32::MAX; 2]; PG]), self.pages.len() as u32 - 1).1);
-            (self.dir[v / PG] = p, self.used.push((v / PG) as u32));
+        if self.0[v / PG] == NO {
+            let new = |l: &mut Labels| (l.1.push([[NO; 2]; PG]), l.1.len() as u32 - 1).1;
+            self.0[v / PG] = self.2.pop().unwrap_or_else(|| new(self));
+            self.3.push((v / PG) as u32);
         }
-        &mut self.pages[self.dir[v / PG] as usize][v % PG]
+        &mut self.1[self.0[v / PG] as usize][v % PG]
     }
     // Every label is unset again (the sides reset theirs): the pages go back to the pool.
     fn release(&mut self) {
-        for i in self.used.drain(..) {
-            self.free.push(std::mem::replace(&mut self.dir[i as usize], u32::MAX));
+        for i in self.3.drain(..) {
+            self.2.push(std::mem::replace(&mut self.0[i as usize], NO));
         }
     }
 }
 
-// One half (k = 0 forward, 1 backward) of a bidirectional Dijkstra search: touched nodes and a heap of
-// dist << 32 | node. Both halves' u32 labels share one array of pairs, so the meeting check at a settled
+// One half of a bidirectional Dijkstra search: .0 = 0 forward, 1 backward, .1 the touched nodes, .2 a heap
+// of dist << 32 | node. Both halves' u32 labels share one pair per node, so the meeting check at a settled
 // node reads the cache line its own label is in.
-struct Side {
-    k: usize,
-    seen: Vec<u32>,
-    h: BinaryHeap<Reverse<u64>>,
-}
+struct Side(usize, Vec<u32>, BinaryHeap<Reverse<u64>>);
 
 impl Side {
     fn top(&self) -> u64 {
-        self.h.peek().map_or(u64::MAX, |r| r.0 >> 32)
+        self.2.peek().map_or(u64::MAX, |r| r.0 >> 32)
     }
     fn start(&mut self, d: &mut Labels, s: usize) {
-        (d.at(s)[self.k] = 0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
+        d.at(s)[self.0] = 0;
+        (self.1.push(s as u32), self.2.push(Reverse(s as u64)));
     }
     // Settles the nearest node; `best` takes its sum with the other half's label (checking at settle time
-    // is enough for the stop rule top + top >= best). False if a sum does
-    // not fit in u32 (the weights near 2^32 on the special nodes): the query then goes to `wide`.
+    // is enough for the stop rule top + top >= best). False if a sum does not fit in u32 (the weights near
+    // 2^32 on the special nodes): the query then goes to `wide`.
     fn step(&mut self, off: &[u32], adj: &[(u32, u32)], d: &mut Labels, best: &mut u64) -> bool {
-        let Reverse(e) = self.h.pop().unwrap();
-        let (du, u, k) = (e >> 32, e as u32 as usize, self.k);
+        let Reverse(e) = self.2.pop().unwrap();
+        let (du, u, k) = (e >> 32, e as u32 as usize, self.0);
         let lu = d.get(u);
         if du > lu[k] as u64 {
             return true;
         }
-        if lu[1 - k] != u32::MAX {
+        if lu[1 - k] != NO {
             *best = (*best).min(du + lu[1 - k] as u64);
         }
         for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
             let (v, nd) = (v as usize, du + w as u64);
-            if nd >= u32::MAX as u64 {
+            if nd >= NO as u64 {
                 return false;
             }
             let dv = d.get(v)[k];
             if nd < dv as u64 {
-                if dv == u32::MAX {
-                    self.seen.push(v as u32);
+                if dv == NO {
+                    self.1.push(v as u32);
                 }
-                (d.at(v)[k] = nd as u32, self.h.push(Reverse(nd << 32 | v as u64)));
+                (d.at(v)[k] = nd as u32, self.2.push(Reverse(nd << 32 | v as u64)));
             }
         }
         true
     }
     fn reset(&mut self, d: &mut Labels) {
-        for &v in &self.seen {
-            d.at(v as usize)[self.k] = u32::MAX;
+        for &v in &self.1 {
+            d.at(v as usize)[self.0] = NO;
         }
-        (self.seen.clear(), self.h.clear());
+        (self.1.clear(), self.2.clear());
     }
 }
 
 // The same search with u64 distances in a hash map, for the few queries whose sums pass 2^32 - 2.
 fn wide(off: &[u32], adj: &[(u32, u32)], s: usize, t: usize) -> u64 {
-    let (mut dist, mut heap) = (HashMap::from([(s, 0u64)]), BinaryHeap::from([Reverse((0u64, s))]));
+    let mut dist = HashMap::from([(s, 0u64)]);
+    let mut heap = BinaryHeap::from([Reverse((0u64, s))]);
     while let Some(Reverse((du, u))) = heap.pop() {
         if u == t {
             return du;
@@ -212,7 +196,7 @@ fn main() {
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     let d = load(&format!("{din}/graph.txt"));
     let mut p = 0;
-    let (n, _m) = (num(d, &mut p) as usize, num(d, &mut p));
+    let n = (num(d, &mut p) as usize, num(d, &mut p)).0;
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
     let mut bs: Vec<usize> = (0..nt).map(|k| p + k * (d.len() - p) / nt).collect();
     for b in &mut bs[1..] {
@@ -222,20 +206,26 @@ fn main() {
     }
     bs.push(d.len());
     // Edges cut by tail range per thread, then a CSR built range by range: no atomic in either pass.
-    let c = n.div_ceil(nt);
-    let bs = &bs;
+    let (c, bs, rng) = (n.div_ceil(nt), &bs, |t: usize| t * n / nt..(t + 1) * n / nt);
     let parts = par(nt, |t| {
         let mut l: Vec<Vec<_>> = (0..nt).map(|_| Vec::with_capacity((bs[t + 1] - bs[t]) / 16 / nt)).collect();
-        edges(d, bs[t], bs[t + 1], |u, v, w| l[u / c].push((u as u32, v as u32, w)));
+        let (mut p, e) = (bs[t], bs[t + 1]);
+        while p < e {
+            let (u, v, w) = (num(d, &mut p) as u32, num(d, &mut p) as u32, num(d, &mut p) as u32);
+            if u != v {
+                l[u as usize / c].push((u, v, w)); // a self-loop never shortens a path
+            }
+        }
         l
     });
     let (off, adj) = csr(n, &parts);
     drop(parts);
     // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
     // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
-    let own: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(u32::MAX)).collect();
+    let own: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(NO)).collect();
+    let claim = |v: usize, t: u32| own[v].compare_exchange(NO, t, Relaxed, Relaxed).is_ok();
     let bfs = |r: usize, t: u32, q: &mut Vec<u32>| {
-        if own[r].compare_exchange(u32::MAX, t, Relaxed, Relaxed).is_err() {
+        if !claim(r, t) {
             return;
         }
         let mut h = q.len();
@@ -244,9 +234,7 @@ fn main() {
             let u = q[h] as usize;
             h += 1;
             for &(v, _) in &adj[off[u] as usize..off[u + 1] as usize] {
-                if own[v as usize].load(Relaxed) == u32::MAX
-                    && own[v as usize].compare_exchange(u32::MAX, t, Relaxed, Relaxed).is_ok()
-                {
+                if own[v as usize].load(Relaxed) == NO && claim(v as usize, t) {
                     q.push(v);
                 }
             }
@@ -254,11 +242,10 @@ fn main() {
     };
     let mut lists = par(nt, |t| {
         let mut q = Vec::with_capacity(2 * n / nt);
-        bfs(t * n / nt, t as u32, &mut q);
-        q
+        (bfs(t * n / nt, t as u32, &mut q), q).1
     });
     // The leftovers (nodes no BFS reached) are found in parallel, then claimed in one thread.
-    let cand = par(nt, |t| (t * n / nt..(t + 1) * n / nt).filter(|&r| own[r].load(Relaxed) == u32::MAX).collect::<Vec<_>>());
+    let cand = par(nt, |t| rng(t).filter(|&r| own[r].load(Relaxed) == NO).collect::<Vec<_>>());
     let mut rest = vec![];
     for r in cand.concat() {
         bfs(r, nt as u32, &mut rest);
@@ -267,23 +254,22 @@ fn main() {
     let ord: Vec<u32> = lists.concat();
     drop((lists, own));
     // New id of each node and the degrees in the new order, then the offsets, in parallel by position.
-    let mut id = vec![u32::MAX; n];
-    let (ip, ordr, offr) = (id.as_mut_ptr() as usize, &ord, &off);
+    let mut id = vec![NO; n];
+    let ip = id.as_mut_ptr() as usize;
     let degs = par(nt, |t| {
-        (t * n / nt..(t + 1) * n / nt)
-            .map(|i| {
-                let o = ordr[i] as usize;
-                unsafe { *(ip as *mut u32).add(o) = i as u32 };
-                offr[o + 1] - offr[o]
-            })
-            .collect::<Vec<u32>>()
+        let deg = |i: usize| {
+            let o = ord[i] as usize;
+            unsafe { *(ip as *mut u32).add(o) = i as u32 };
+            off[o + 1] - off[o]
+        };
+        rng(t).map(deg).collect::<Vec<u32>>()
     });
     let mut off2 = vec![0u32; n + 1];
-    let (o2, degr) = (off2.as_mut_ptr() as usize, &degs);
+    let o2 = off2.as_mut_ptr() as usize;
     let base: Vec<u32> = degs.iter().scan(0, |a, c| (*a, *a += c.iter().sum::<u32>()).0.into()).collect();
     par(nt, |t| {
         let mut a = base[t];
-        for (k, &g) in degr[t].iter().enumerate() {
+        for (k, &g) in degs[t].iter().enumerate() {
             a += g;
             unsafe { *(o2 as *mut u32).add(t * n / nt + k + 1) = a };
         }
@@ -291,17 +277,12 @@ fn main() {
     drop(degs);
     let mut adj2: Vec<(u32, u32)> = vec![(0, 0); adj.len()];
     let ap2 = adj2.as_mut_ptr() as usize;
-    thread::scope(|sc| {
-        for t in 0..nt {
-            let (ord, id, off, off2, adj) = (&ord, &id, &off, &off2, &adj);
-            sc.spawn(move || {
-                for i in t * n / nt..(t + 1) * n / nt {
-                    let o = ord[i] as usize;
-                    for (k, &(v, w)) in adj[off[o] as usize..off[o + 1] as usize].iter().enumerate() {
-                        unsafe { *(ap2 as *mut (u32, u32)).add(off2[i] as usize + k) = (id[v as usize], w) };
-                    }
-                }
-            });
+    par(nt, |t| {
+        for i in rng(t) {
+            let o = ord[i] as usize;
+            for (k, &(v, w)) in adj[off[o] as usize..off[o + 1] as usize].iter().enumerate() {
+                unsafe { *(ap2 as *mut (u32, u32)).add(off2[i] as usize + k) = (id[v as usize], w) };
+            }
         }
     });
     drop(off);
@@ -311,12 +292,13 @@ fn main() {
     // sum, each edge placed at its head's end minus one: after the renumbering a head is near its tail, so
     // a thread working a range of tails mostly touches counters no other thread does.
     let r: Vec<AtomicU32> = (0..=n).map(|_| AtomicU32::new(0)).collect();
-    let rows = |t: usize| (t * n / nt..(t + 1) * n / nt).flat_map(|u| adj[off[u] as usize..off[u + 1] as usize].iter().map(move |&(v, w)| (u, v as usize, w)));
-    par(nt, |t| rows(t).for_each(|(_, v, _)| _ = r[v].fetch_add(1, Relaxed)));
-    let sums = par(nt, |t| (t * n / nt..(t + 1) * n / nt).map(|v| r[v].load(Relaxed)).sum::<u32>());
+    let row = |u: usize| adj[off[u] as usize..off[u + 1] as usize].iter().map(move |&(v, w)| (u, v, w));
+    let rows = |t: usize| rng(t).flat_map(row);
+    par(nt, |t| rows(t).for_each(|(_, v, _)| _ = r[v as usize].fetch_add(1, Relaxed)));
+    let sums = par(nt, |t| rng(t).map(|v| r[v].load(Relaxed)).sum::<u32>());
     par(nt, |t| {
         let mut a = sums[..t].iter().sum::<u32>();
-        for v in t * n / nt..(t + 1) * n / nt {
+        for v in rng(t) {
             a += r[v].load(Relaxed);
             r[v].store(a, Relaxed);
         }
@@ -326,7 +308,7 @@ fn main() {
     let rp = radj.as_mut_ptr() as usize;
     par(nt, |t| {
         for (u, v, w) in rows(t) {
-            let j = r[v].fetch_sub(1, Relaxed) - 1;
+            let j = r[v as usize].fetch_sub(1, Relaxed) - 1;
             unsafe { *(rp as *mut (u32, u32)).add(j as usize) = (u as u32, w) };
         }
     });
@@ -336,7 +318,8 @@ fn main() {
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
     while p < q.len() {
-        qs.push((id[num(&q, &mut p) as usize] as usize, id[num(&q, &mut p) as usize] as usize));
+        let s = id[num(&q, &mut p) as usize] as usize;
+        qs.push((s, id[num(&q, &mut p) as usize] as usize));
     }
     drop(id);
     let ans: Vec<AtomicU64> = qs.iter().map(|_| AtomicU64::new(0)).collect();
@@ -345,40 +328,32 @@ fn main() {
     let mut qo: Vec<usize> = (0..qs.len()).collect();
     qo.sort_unstable_by_key(|&i| qs[i]);
     let next = AtomicUsize::new(0);
-    let (off, adj, roff, radj) = (&off, &adj, &roff, &radj);
-    thread::scope(|sc| {
-        for _ in 0..nt {
-            let (qs, qo, ans, next) = (&qs, &qo, &ans, &next);
-            sc.spawn(move || {
-                let mut d = Labels { dir: vec![u32::MAX; n.div_ceil(PG)], pages: vec![], free: vec![], used: vec![] };
-                let (mut f, mut b) = (Side { k: 0, seen: vec![], h: BinaryHeap::new() }, Side { k: 1, seen: vec![], h: BinaryHeap::new() });
+    par(nt, |_| {
+        let mut d = Labels(vec![NO; n.div_ceil(PG)], vec![], vec![], vec![]);
+        let (mut f, mut b) = (Side(0, vec![], BinaryHeap::new()), Side(1, vec![], BinaryHeap::new()));
+        while let Some(&i) = qo.get(next.fetch_add(1, Relaxed)) {
+            let ((s, t), mut best) = (qs[i], u64::MAX); // MAX: unreachable
+            if s == t {
+                best = 0;
+            } else if roff[t] < roff[t + 1] && off[s] < off[s + 1] {
+                (f.start(&mut d, s), b.start(&mut d, t));
                 loop {
-                    let Some(&i) = qo.get(next.fetch_add(1, Relaxed)) else { break };
-                    let (s, t) = qs[i];
-                    let mut best = u64::MAX; // unreachable
-                    if s == t {
-                        best = 0;
-                    } else if roff[t] < roff[t + 1] && off[s] < off[s + 1] {
-                        (f.start(&mut d, s), b.start(&mut d, t));
-                        loop {
-                            let (x, y) = (f.top(), b.top());
-                            if x.saturating_add(y) >= best {
-                                break;
-                            }
-                            let ok = match x <= y {
-                                true => f.step(off, adj, &mut d, &mut best),
-                                false => b.step(roff, radj, &mut d, &mut best),
-                            };
-                            if !ok {
-                                best = wide(off, adj, s, t);
-                                break;
-                            }
-                        }
-                        (f.reset(&mut d), b.reset(&mut d), d.release());
+                    let (x, y) = (f.top(), b.top());
+                    if x.saturating_add(y) >= best {
+                        break;
                     }
-                    ans[i].store(best, Relaxed);
+                    let ok = match x <= y {
+                        true => f.step(&off, &adj, &mut d, &mut best),
+                        false => b.step(&roff, &radj, &mut d, &mut best),
+                    };
+                    if !ok {
+                        best = wide(&off, &adj, s, t);
+                        break;
+                    }
                 }
-            });
+                (f.reset(&mut d), b.reset(&mut d), d.release());
+            }
+            ans[i].store(best, Relaxed);
         }
     });
     let mut out = Vec::with_capacity(qs.len() * 12);
