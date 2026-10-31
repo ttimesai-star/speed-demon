@@ -23,6 +23,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 12 | Name slots of 32 bytes: the key word, then the first 16 bytes of the name inline (a longer name keeps its further words in the arena), filled behind a busy marker so no reader compares a half-written slot; 2^17 slots. Nine lookups in ten read one cache line instead of a slot and then its arena words. PC slower (138 vs 130 ms on one thread, its 96 MB L3 holds everything), board faster (commit eaa8061) | run-20344632fbda | 0.0531 | 13.4 | 71.25 |
 | 13 | The same logic written for fewer formatted lines: the aggregate as an `[i64; 7]` with one merge function, field lengths by arithmetic instead of `if`/`else`, one `zeroed` and one `pf` (prefetch) helper, the name table and arena in one allocation. S 368 → 288; PC timing unchanged (130.5 vs 130.1 ms on one thread) (commit 93bcecc) | run-5fb4ccfdd39e | 0.0547 | 13.5 | 71.71 |
 | — | Without `PR_SET_THP_DISABLE` (do 4 KB pages on the tables cost the board TLB misses?): T 0.0540 s, M 13.5 → 14.6 MB, no gain; the prctl stays (commit ade2053) | run-90a7a65bf1ff | 0.0540 | 14.6 | 71.53 |
+| 14 | Each thread drops its whole pages of the input mapping (`MADV_DONTNEED`) when its part is parsed: the unmapping runs in the 12 threads instead of in the process exit (~5.6 ms outside `main` in the step-9 profile) (commit 53b727e) | run-35f43149a29b | 0.0521 | 13.6 | 72.17 |
 
 ## Correctness checks
 

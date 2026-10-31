@@ -26,6 +26,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 13 | Queries taken in the order of their sources' new ids, so the searches that run at the same time work on nearby parts of the graph and share the L3 (commit eaa8061) | run-97a70a6e5921 | 0.2076 | 137.1 | 64.26 |
 | 14 | The same logic written for fewer formatted lines (tuple structs for the labels and the search halves, one range helper, the per-thread loops through `par`). S 429 → 363 (commit 93bcecc) | run-da19dbb800c2 | 0.2128 | 137.6 | 64.51 |
 | 15 | The claim map, the id map and the in-degree counters come zeroed from calloc (0 = unclaimed, else 1 + the thread) and the renumbered edge array is not filled: no 7 MB passes in one thread before the parallel work. PC: the claim map alone was 2.3 ms of one thread (commit ade2053) | run-d8c083ab0c7a | 0.2106 | 138.6 | 64.56 |
+| 16 | One label lookup per relaxed edge (a missing page means an unset label, which the new distance improves anyway); prefetches three rows ahead in the renumbered copy (offsets, edges, new ids of the heads) and in the BFS (the offsets of a node when it is queued, its edges four pops ahead). PC 114 → 109 ms (commit 53b727e) | run-011b0ad3d598 | 0.2003 | 137.2 | 65.06 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 

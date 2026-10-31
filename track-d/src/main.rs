@@ -19,7 +19,7 @@ fn load(path: &str) -> &'static [u8] {
 }
 
 const NO: u32 = u32::MAX;
-const PG: usize = 512; // nodes per label page (4 KB of [u32; 2])
+const PG: usize = 128; // nodes per label page
 
 // Eight bytes at d[p..], little-endian, zero-padded past the end of d.
 fn word(d: &[u8], p: usize) -> u64 {
