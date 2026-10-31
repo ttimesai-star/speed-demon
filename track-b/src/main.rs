@@ -224,7 +224,7 @@ impl Set {
 struct Part {
     cnt: Vec<u32>,
     bit: Vec<u32>,
-    stream: Vec<u32>,
+    stream: Vec<u16>, // term ranks; a rank of 0xFFFF or more is 0xFFFF, high half, low half
     ends: Vec<u32>,
     tb: Vec<Vec<u64>>,
     found: Vec<(u32, u32)>,
@@ -344,6 +344,12 @@ fn main() {
         trig[v[j] as usize].push((k as u32, j as u32));
     }
     let tf: Vec<bool> = trig.iter().map(|x| !x.is_empty()).collect(); // 75 KB instead of the list headers
+    // Terms ranked by the sampled counts, most frequent first, so nearly every stream entry fits in a u16.
+    let mut order: Vec<u32> = (0..nterms as u32).collect();
+    order.sort_by_key(|&w| std::cmp::Reverse(est.iter().map(|c| c[w as usize]).sum::<u32>()));
+    let mut rank = vec![0u32; nterms];
+    order.iter().enumerate().for_each(|(r, &w)| rank[w as usize] = r as u32);
+    let (rank, order) = (&rank, &order);
     let (dict, trig, tf, phr, bs, first) = (dict, &trig, &tf, &phr, &bs, &first);
     let parts = par(nt, |t| {
         let range = first[t + 1] - first[t];
@@ -362,7 +368,11 @@ fn main() {
                     let e = &mut st[u];
                     e[0] = id;
                     if e[2] == NONE {
-                        (e[1] += 1, stream.push(w));
+                        e[1] += 1;
+                        match rank[u] {
+                            r @ 0..0xFFFF => stream.push(r as u16),
+                            r => stream.extend([0xFFFF, (r >> 16) as u16, r as u16]),
+                        }
                         if e[1] as usize * 32 >= range {
                             (e[2] = tb.len() as u32, tb.push(vec![0u64; range / 64 + 1]));
                         }
@@ -425,8 +435,14 @@ fn main() {
         let set = |w: usize, i: usize| unsafe { (*((ptrs[w] as *const AtomicU64).add(i / 64))).fetch_or(1 << (i % 64), Relaxed) };
         let mut e = 0;
         for (k, &end) in x.ends.iter().enumerate() {
-            for &w in &x.stream[e..end as usize] {
-                let w = w as usize;
+            let mut j = e;
+            while j < end as usize {
+                let (mut r, step) = (x.stream[j] as usize, 1 + 2 * (x.stream[j] == 0xFFFF) as usize);
+                if step == 3 {
+                    r = (x.stream[j + 1] as usize) << 16 | x.stream[j + 2] as usize;
+                }
+                let w = order[r] as usize;
+                j += step;
                 match big[w] {
                     true => drop(set(w, first[t] + k)),
                     false => unsafe { *(ptrs[w] as *mut u32).add(cur[w] as usize) = (first[t] + k) as u32 },
