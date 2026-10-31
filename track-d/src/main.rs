@@ -99,24 +99,46 @@ impl G {
     }
 }
 
-// One half of a bidirectional Dijkstra search: .0 = 0 forward, 1 backward, .1 a heap of dist << 32 | node.
-// Both halves' u32 labels share one pair per node, so the meeting check at a settled node reads the cache
-// line its own label is in.
-struct Side(usize, BinaryHeap<Reverse<u64>>);
+// A radix heap of (dist, node): Dijkstra pops distances in order and pushes none below the last pop, so
+// bucket i holds the entries whose highest bit differing from that last pop is bit i - 1; a pop from an
+// empty bucket 0 moves the lowest non-empty bucket down around its minimum. No comparisons to sift.
+struct Heap(u32, [Vec<(u32, u32)>; 33]);
+
+impl Heap {
+    fn push(&mut self, k: u32, v: u32) {
+        self.1[(32 - (k ^ self.0).leading_zeros()) as usize].push((k, v));
+    }
+    // The smallest distance (u64::MAX if empty), with bucket 0 refilled.
+    fn top(&mut self) -> u64 {
+        if self.1[0].is_empty() {
+            let Some(i) = (1..33).find(|&i| !self.1[i].is_empty()) else { return u64::MAX };
+            let mut b = std::mem::take(&mut self.1[i]);
+            self.0 = b.iter().map(|e| e.0).min().unwrap();
+            b.drain(..).for_each(|(k, v)| self.push(k, v));
+            self.1[i] = b; // keeps its capacity
+        }
+        self.0 as u64
+    }
+}
+
+// One half of a bidirectional Dijkstra search: .0 = 0 forward, 1 backward, .1 its heap. Both halves' u32
+// labels share one pair per node, so the meeting check at a settled node reads the cache line its own
+// label is in.
+struct Side(usize, Heap);
 
 impl Side {
-    fn top(&self) -> u64 {
-        self.1.peek().map_or(u64::MAX, |r| r.0 >> 32)
+    fn top(&mut self) -> u64 {
+        self.1.top()
     }
     fn start(&mut self, d: &mut Labels, s: usize) {
-        (d.at(s)[self.0] = 0, self.1.push(Reverse(s as u64)));
+        (d.at(s)[self.0] = 0, self.1 .0 = 0, self.1.push(0, s as u32));
     }
     // Settles the nearest node; `best` takes its sum with the other half's label (checking at settle time
     // is enough for the stop rule top + top >= best). False if a sum does not fit in u32 (the weights near
     // 2^32 on the special nodes): the query then goes to `wide`.
     fn step(&mut self, g: &G, d: &mut Labels, best: &mut u64) -> bool {
-        let Reverse(e) = self.1.pop().unwrap();
-        let (du, u, k) = (e >> 32, e as u32 as usize, self.0);
+        let (du, u) = self.1 .1[0].pop().unwrap(); // after top()
+        let (du, u, k) = (du as u64, u as usize, self.0);
         let lu = d.get(u);
         if du > lu[k] as u64 {
             return true;
@@ -131,7 +153,7 @@ impl Side {
             }
             let l = d.at(v); // a missing page means an unset label, which nd improves anyway
             if nd < l[k] as u64 {
-                (l[k] = nd as u32, self.1.push(Reverse(nd << 32 | v as u64)));
+                (l[k] = nd as u32, self.1.push(nd as u32, v as u32));
             }
         }
         true
@@ -357,7 +379,7 @@ fn main() {
         }
         big
     });
-    let spare = g0.1; // the old edges, same length: the reverse edges go there (warm pages are cheap on the box)
+    drop(g0);
     let g = G(off2, adj2, big.concat(), vb);
     // Reverse CSR for the backward half of the search, in place of the old edge array (already faulted in:
     // fresh pages are costly on the box). In-degrees counted with atomics, their ends as a parallel prefix
@@ -375,7 +397,8 @@ fn main() {
             r[v].store(a, Relaxed);
         }
     });
-    let mut radj = spare;
+    let mut radj: Vec<u32> = Vec::with_capacity(m);
+    unsafe { radj.set_len(m) }; // every slot is written below
     let rp = radj.as_mut_ptr() as usize;
     let mut big = par(nt, |t| {
         let mut big = vec![];
@@ -409,7 +432,7 @@ fn main() {
     let next = AtomicUsize::new(0);
     par(nt, |_| {
         let mut d = Labels(vec![NO; n.div_ceil(PG)], vec![], vec![], vec![]);
-        let side = |k| Side(k, BinaryHeap::new());
+        let side = |k| Side(k, Heap(0, std::array::from_fn(|_| vec![])));
         let (mut f, mut b) = (side(0), side(1));
         while let Some(&i) = qo.get(next.fetch_add(1, Relaxed)) {
             let ((s, t), mut best) = (qs[i], u64::MAX); // MAX: unreachable
@@ -431,7 +454,7 @@ fn main() {
                         break;
                     }
                 }
-                (f.1.clear(), b.1.clear(), d.release());
+                (f.1 .1.iter_mut().chain(&mut b.1 .1).for_each(Vec::clear), d.release());
             }
             ans[i].store(best, Relaxed);
         }
