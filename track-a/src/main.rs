@@ -133,10 +133,13 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &(Vec<AtomicU64>, Vec<AtomicU64>)) -
 }
 
 fn main() {
+    let t0 = std::time::Instant::now();
+    let us = || t0.elapsed().as_micros();
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) }; // PR_SET_THP_DISABLE: small vectors, no 2 MB pages
     let d = load(&format!("{din}/requests.log"));
+    let tl = us();
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
     let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
     for b in &mut bs[1..] {
@@ -148,12 +151,18 @@ fn main() {
     let new = || (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let tab: (Vec<AtomicU64>, Vec<AtomicU64>) = (new(), new());
     let (bs, tb) = (&bs, &tab);
-    let parts: Vec<Vec<Hour>> = thread::scope(|sc| {
+    let tp = us();
+    let parts: Vec<(u128, Vec<Hour>, u128)> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
-            .map(|t| sc.spawn(move || parse(d, bs[t], bs[t + 1], tb)))
+            .map(|t| sc.spawn(move || (us(), parse(d, bs[t], bs[t + 1], tb), us())))
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    let tj = us();
+    let mut st: Vec<u128> = parts.iter().map(|x| x.0).collect();
+    let mut en: Vec<u128> = parts.iter().map(|x| x.2).collect();
+    (st.sort(), en.sort());
+    let parts: Vec<Vec<Hour>> = parts.into_iter().map(|x| x.1).collect();
     let mut hours: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::new(Vec::new())).collect();
     for (h, x) in parts.into_iter().flat_map(|p| p.into_iter().enumerate()) {
         hours[h].get_mut().unwrap().push(x);
@@ -162,6 +171,7 @@ fn main() {
     let ep = |s: usize| &d[(key(s) >> 8) as usize..][..(key(s) & 255) as usize];
     let mut order: Vec<usize> = (0..SLOTS).filter(|&s| key(s) != 0).collect();
     order.sort_unstable_by_key(|&s| ep(s));
+    let tg = us();
     fs::create_dir_all(&dout).unwrap();
     let f = fs::File::create(format!("{dout}/summary.txt")).unwrap();
     // Workers take hours in order; whoever holds `ready` writes every finished buffer that is next.
@@ -229,5 +239,12 @@ fn main() {
             }
         }
     };
-    thread::scope(|sc| (0..nt).for_each(|_| drop(sc.spawn(&work))));
+    let tw = us();
+    let mut fin: Vec<u128> = thread::scope(|sc| {
+        let hs: Vec<_> = (0..nt).map(|_| sc.spawn(|| (work(), us()).1)).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    fin.sort();
+    let name = format!("A3_l{tl}_b{tp}_s{}-{}_e{}-{}-{}_j{tj}_g{tg}_w{tw}_f{}-{}-{}_x{}", st[0], st[nt - 1], en[0], en[nt / 2], en[nt - 1], fin[0], fin[nt / 2], fin[nt - 1], us());
+    fs::write(format!("{dout}/{name}"), b"").unwrap();
 }

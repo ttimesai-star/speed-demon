@@ -131,6 +131,8 @@ fn pf<const W: i32, T>(p: &T) {
 }
 
 fn main() {
+    let t0 = std::time::Instant::now();
+    let us = || t0.elapsed().as_micros();
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     let r = load(&format!("{din}/regions.csv"));
@@ -164,21 +166,24 @@ fn main() {
     };
     let has = zeroed::<AtomicU8>(26 * 26 * 26);
     let country = zeroed::<AtomicU8>(10_000_000);
+    let tb = us();
     let t = zeroed::<AtomicU64>(SLOTS);
     let seen = zeroed::<AtomicU64>(256 * IDS / 64);
     // A code is marked present only if it is not yet: twelve threads storing into the same few bytes
     // 200,000 times would pass the cache lines around.
     let present = |key: usize| _ = has[key].load(Relaxed) == 0 && has[key].swap(1, Relaxed) == 0;
     let (bs, rows, wait) = (&bs, &rows, &std::sync::Barrier::new(nt));
-    let parts: Vec<Vec<[i64; 7]>> = thread::scope(|sc| {
+    let parts: Vec<(Vec<[i64; 7]>, u128, u128, u128)> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
                 sc.spawn(move || {
+                    let ts = us();
                     rows(k, &mut |_, key| present(key));
                     wait.wait();
                     let rank: Vec<u8> = has.iter().scan(1, |n, h| Some((*n, *n += h.load(Relaxed)).0)).collect();
                     rows(k, &mut |id, key| country[id].store(rank[key], Relaxed));
                     wait.wait();
+                    let tr = us();
                     let (mut agg, mut pend, mut bit) = (vec![ZERO; 256], None, None);
                     let set = |(k, b): (usize, u64)| {
                         if seen[k].load(Relaxed) & b == 0 {
@@ -252,12 +257,16 @@ fn main() {
                     // instead of the process exit doing all of it in one thread.
                     let (a, e) = (bs[k].next_multiple_of(4096), bs[k + 1] / 4096 * 4096);
                     unsafe { madvise(d.as_ptr().add(a.min(e)), e - a.min(e), 4) };
-                    agg
+                    (agg, ts, tr, us())
                 })
             })
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    let tj = us();
+    let mut st: Vec<[u128; 3]> = parts.iter().map(|x| [x.1, x.2, x.3]).collect();
+    st.sort_by_key(|x| x[2]);
+    let parts: Vec<Vec<[i64; 7]>> = parts.into_iter().map(|x| x.0).collect();
     let top = TOP.load(Relaxed);
     assert!((top as usize) < 1 << 20);
     let marked = |k: &usize| has[*k].load(Relaxed) == 1;
@@ -285,4 +294,6 @@ fn main() {
     }
     fs::create_dir_all(&dout).unwrap();
     fs::write(format!("{dout}/aggregates.txt"), out).unwrap();
+    let name = format!("C3_b{tb}_s{}_r{}_e{}-{}-{}_j{tj}_w{}", st[0][0], st[0][1], st[0][2], st[nt / 2][2], st[nt - 1][2], us());
+    fs::write(format!("{dout}/{name}"), b"").unwrap();
 }
