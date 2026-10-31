@@ -8,6 +8,7 @@ use std::{env, fs, thread};
 extern "C" {
     fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn madvise(a: *const u8, len: usize, advice: i32) -> i32;
+    fn mallopt(param: i32, value: i32) -> i32;
 }
 
 fn load(path: &str) -> &'static [u8] {
@@ -266,6 +267,7 @@ fn csr(n: usize, parts: &[(Vec<Vec<u64>>, Vec<(u32, u32, u32)>)], vb: u32) -> G 
 }
 
 fn main() {
+    unsafe { mallopt(-3, 1 << 16) }; // M_MMAP_THRESHOLD fixed at 64 KB: freed buffers leave M at once
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     let d = load(&format!("{din}/graph.txt"));
