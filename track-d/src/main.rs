@@ -346,9 +346,10 @@ fn main() {
     // New id of each node and the degrees in the new order, then the offsets, in parallel by position.
     let mut id = vec![0u32; n]; // calloc: every entry is written below
     let ip = id.as_mut_ptr() as usize;
+    let ahead = |o: usize| (pf(&g0.0[o]), pf(unsafe { &*(ip as *const u32).add(o) }));
     let degs = par(nt, |t| {
         let deg = |i: usize| {
-            ord.get(i + 16).map(|&o| (pf(&g0.0[o as usize]), pf(unsafe { &*(ip as *const u32).add(o as usize) })));
+            ord.get(i + 16).map(|&o| ahead(o as usize));
             let o = ord[i] as usize;
             unsafe { *(ip as *mut u32).add(o) = i as u32 };
             g0.0[o + 1] - g0.0[o]

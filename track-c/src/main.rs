@@ -169,14 +169,17 @@ fn main() {
     // A code is marked present only if it is not yet: twelve threads storing into the same few bytes
     // 200,000 times would pass the cache lines around.
     let present = |key: usize| _ = has[key].load(Relaxed) == 0 && has[key].swap(1, Relaxed) == 0;
-    let (bs, rows, wait, next) = (&bs, &rows, &std::sync::Barrier::new(nt), &AtomicUsize::new(0));
+    let (bs, rows) = (&bs, &rows);
+    let (wait, next) = (&std::sync::Barrier::new(nt), &AtomicUsize::new(0));
+    let chunk = || bs.get(next.fetch_add(1, Relaxed)..).and_then(|x| x.get(..2));
+    let add = |n: &mut u8, h: &AtomicU8| Some((*n, *n += h.load(Relaxed)).0);
     let parts: Vec<Vec<[i64; 7]>> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
                 sc.spawn(move || {
                     rows(k, &mut |_, key| present(key));
                     wait.wait();
-                    let rank: Vec<u8> = has.iter().scan(1, |n, h| Some((*n, *n += h.load(Relaxed)).0)).collect();
+                    let rank: Vec<u8> = has.iter().scan(1, add).collect();
                     rows(k, &mut |id, key| country[id].store(rank[key], Relaxed));
                     wait.wait();
                     let (mut agg, mut pend, mut bit) = (vec![ZERO; 256], None, None);
@@ -221,7 +224,7 @@ fn main() {
                     // Structure 64 bytes at a time: a byte is inside quotes when an odd number of quotes precede
                     // it in the record (a "" pair flips twice), so the separators are the commas and LFs outside
                     // quotes, four commas and then the LF per record. q counts the quotes of the field so far.
-                    while let Some(&[a, z]) = bs.get(next.fetch_add(1, Relaxed)..).and_then(|x| x.get(..2)) {
+                    while let Some(&[a, z]) = chunk() {
                     let (mut f, mut st, mut en, mut qs) = (0, [a; 5], [0; 5], [0; 5]);
                     let (mut blk, mut ins, mut q) = (a, 0u64, 0);
                     while blk < z {
@@ -274,7 +277,8 @@ fn main() {
             continue;
         }
         let used = top as usize / 64 + 1; // words that can hold a set bit
-        let names: u32 = seen[g * IDS / 64..][..used].iter().map(|w| w.load(Relaxed).count_ones()).sum();
+        let ones = |w: &AtomicU64| w.load(Relaxed).count_ones();
+        let names: u32 = seen[g * IDS / 64..][..used].iter().map(ones).sum();
         match code {
             Some(k) => out.extend([k / 676, k / 26 % 26, k % 26].map(|x| b'A' + x as u8)),
             None => out.extend(b"_UNMATCHED"),
