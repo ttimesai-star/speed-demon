@@ -70,21 +70,6 @@ fn slot(tab: &(Vec<AtomicU64>, Vec<AtomicU64>), s: usize, n: usize, h: u64) -> u
     }
 }
 
-// Runs f(0..nt) on nt threads and returns the results in thread order. The threads start as a tree (thread t
-// spawns 2t + 1 and 2t + 2): a spawn takes ~80 µs on the box, so a chain of twelve would delay the last one
-// by ~1 ms in each of the eleven parallel phases.
-fn par<T: Send + Sync>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    let out: Vec<std::sync::OnceLock<T>> = (0..nt).map(|_| std::sync::OnceLock::new()).collect();
-    fn go<'s, 'e, T: Send + Sync>(sc: &'s thread::Scope<'s, 'e>, t: usize, f: &'e (dyn Fn(usize) -> T + Sync), out: &'e [std::sync::OnceLock<T>]) {
-        for c in [2 * t + 1, 2 * t + 2].into_iter().filter(|&c| c < out.len()) {
-            sc.spawn(move || go(sc, c, f, out));
-        }
-        _ = out[t].set(f(t));
-    }
-    thread::scope(|sc| go(sc, 0, &f, &out));
-    out.into_iter().map(|x| x.into_inner().unwrap()).collect()
-}
-
 // Appends " x" in decimal.
 fn put(b: &mut Vec<u8>, mut x: usize) {
     let (mut t, mut i) = ([b' '; 21], 21);
@@ -163,7 +148,12 @@ fn main() {
     let new = || (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let tab: (Vec<AtomicU64>, Vec<AtomicU64>) = (new(), new());
     let (bs, tb) = (&bs, &tab);
-    let parts = par(nt, |t| parse(d, bs[t], bs[t + 1], tb));
+    let parts: Vec<Vec<Hour>> = thread::scope(|sc| {
+        let hs: Vec<_> = (0..nt)
+            .map(|t| sc.spawn(move || parse(d, bs[t], bs[t + 1], tb)))
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
     let mut hours: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::new(Vec::new())).collect();
     for (h, x) in parts.into_iter().flat_map(|p| p.into_iter().enumerate()) {
         hours[h].get_mut().unwrap().push(x);
@@ -239,5 +229,5 @@ fn main() {
             }
         }
     };
-    par(nt, |_| work());
+    thread::scope(|sc| (0..nt).for_each(|_| drop(sc.spawn(&work))));
 }
