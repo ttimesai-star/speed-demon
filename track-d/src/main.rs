@@ -4,6 +4,10 @@ use std::collections::{BinaryHeap, HashMap};
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::{env, fs, thread};
+static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+fn us() -> u64 {
+    T0.get().unwrap().elapsed().as_micros() as u64
+}
 
 extern "C" {
     fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
@@ -266,6 +270,7 @@ fn csr(n: usize, parts: &[(Vec<Vec<u64>>, Vec<(u32, u32, u32)>)], vb: u32) -> G 
 }
 
 fn main() {
+    T0.set(std::time::Instant::now()).unwrap();
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     let d = load(&format!("{din}/graph.txt"));
@@ -301,7 +306,9 @@ fn main() {
         unsafe { madvise(d.as_ptr().add(a.min(e)), e - a.min(e), 4) };
         (l, big)
     });
+    let tp = us();
     let g0 = csr(n, &parts, vb);
+    let tc = us();
     drop(parts);
     // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
     // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
@@ -326,6 +333,7 @@ fn main() {
             }
         }
     };
+    let tb0 = us();
     let mut lists = par(nt, |t| {
         let mut q = Vec::with_capacity(2 * n / nt);
         (bfs(t * n / nt, t as u32, &mut q), q).1
@@ -338,6 +346,7 @@ fn main() {
         bfs(r, nt as u32, &mut rest);
     }
     lists.push(rest);
+    let tb = us();
     let ord: Vec<u32> = lists.concat();
     drop((lists, own));
     // New id of each node and the degrees in the new order, then the offsets, in parallel by position.
@@ -352,6 +361,7 @@ fn main() {
         };
         rng(t).map(deg).collect::<Vec<u32>>()
     });
+    let tdeg = us();
     let mut off2 = vec![0u32; n + 1];
     let o2 = off2.as_mut_ptr() as usize;
     let mut base = vec![0u32];
@@ -387,6 +397,7 @@ fn main() {
         }
         big
     });
+    let tadj = us();
     drop(g0);
     let g = G(off2, adj2, big.concat(), vb);
     // Reverse CSR for the backward half of the search, in place of the old edge array (already faulted in:
@@ -430,6 +441,7 @@ fn main() {
     let roff = r.into_iter().map(AtomicU32::into_inner).collect();
     let rg = G(roff, radj, big, vb);
     drop(ord);
+    let trev = us();
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
     while p < q.len() {
@@ -442,6 +454,7 @@ fn main() {
     // nearby parts of the graph, which the shared cache then holds for all of them.
     let mut qo: Vec<usize> = (0..qs.len()).collect();
     qo.sort_unstable_by_key(|&i| qs[i]);
+    let tq0 = us();
     let next = AtomicUsize::new(0);
     par(nt, |_| {
         let mut d = Labels(vec![NO; n.div_ceil(PG)], vec![], vec![], vec![]);
@@ -473,6 +486,7 @@ fn main() {
             ans[i].store(best, Relaxed);
         }
     });
+    let tq1 = us();
     let mut out = Vec::with_capacity(qs.len() * 12);
     for a in &ans {
         match a.load(Relaxed) {
@@ -482,4 +496,6 @@ fn main() {
     }
     fs::create_dir_all(&dout).unwrap();
     fs::write(format!("{dout}/distances.txt"), out).unwrap();
+    let name = format!("D5_tp{tp}_tc{tc}_tb0{tb0}_tb{tb}_tdeg{tdeg}_tadj{tadj}_trev{trev}_tq0{tq0}_tq1{tq1}_w{}", us());
+    fs::write(format!("{dout}/{name}"), b"").unwrap();
 }
