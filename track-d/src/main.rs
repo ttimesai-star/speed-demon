@@ -194,13 +194,19 @@ fn pf<T>(x: &T) {
     unsafe { std::arch::x86_64::_mm_prefetch::<3>(x as *const T as *const i8) };
 }
 
-// Runs f(0..nt) on nt threads and returns the results in thread order.
-fn par<T: Send>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    let f = &f;
-    thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|t| sc.spawn(move || f(t))).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    })
+// Runs f(0..nt) on nt threads and returns the results in thread order. The threads start as a tree (thread t
+// spawns 2t + 1 and 2t + 2): a spawn takes ~80 µs on the box, so a chain of twelve would delay the last one
+// by ~1 ms in each of the eleven parallel phases.
+fn par<T: Send + Sync>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let out: Vec<std::sync::OnceLock<T>> = (0..nt).map(|_| std::sync::OnceLock::new()).collect();
+    fn go<'s, 'e, T: Send + Sync>(sc: &'s thread::Scope<'s, 'e>, t: usize, f: &'e (dyn Fn(usize) -> T + Sync), out: &'e [std::sync::OnceLock<T>]) {
+        for c in [2 * t + 1, 2 * t + 2].into_iter().filter(|&c| c < out.len()) {
+            sc.spawn(move || go(sc, c, f, out));
+        }
+        _ = out[t].set(f(t));
+    }
+    thread::scope(|sc| go(sc, 0, &f, &out));
+    out.into_iter().map(|x| x.into_inner().unwrap()).collect()
 }
 
 // Bits for values below x.
