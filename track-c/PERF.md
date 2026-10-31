@@ -26,6 +26,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 14 | Each thread drops its whole pages of the input mapping (`MADV_DONTNEED`) when its part is parsed: the unmapping runs in the 12 threads instead of in the process exit (~5.6 ms outside `main` in the step-9 profile) (commit 53b727e) | run-35f43149a29b | 0.0521 | 13.6 | 72.17 |
 | — | One thread per core (6 instead of 12): T 0.0656 s, much slower; the hyperthreads hide the cache misses (commit 31d35cb) | run-8e8483bdd36c | 0.0656 | 12.1 | 70.13 |
 | 15 | Bitset rows 2^20 bits plus eight cache lines apart: rows exactly 128 KB apart put the ~200 used lines of every country into the same ~200 of the 2,048 L2 sets (commit 19d3986, pushed as 71254f8) | run-2ce029eb3c87 | 0.0516 | 13.3 | 72.36 |
+| 16 | The regions pass marks a country code present only if it is not marked yet: all twelve threads were storing into the same few bytes, 200,000 times (commit 5764074) | run-8fc820d684fb | 0.0509 | 13.6 | 72.37 |
 
 ## Correctness checks
 

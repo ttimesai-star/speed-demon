@@ -69,3 +69,9 @@ Parse 15.4 ms; first CSR: counts done 21.5, edges placed 36.7, end 37.1; parts f
 ends (last thread) 63.1, leftovers 63.6; new ids, degrees, offsets 71.8; renumbered edges 105.7; reverse CSR 123.6;
 queries 123.7–228.4 ms; T 234.6 ms (a slow push: unchanged track-A code ran 8 % slower too). The renumbered
 copy (34 ms) and the BFS (23 ms) are random reads of rows and ids; step 16 prefetches them.
+
+## Phase profile on the board (run-3ad3f6dd91d8, commit 5764074, step 18 code, a slow push)
+
+Parse 23.1 ms, packed CSR 40.3, claim map 42.9, BFS 64.6, ids and offsets 75.7, renumbered edges 97.9,
+reverse CSR 134.0 (36 ms: twice the step-15 figure, its edge array was fresh memory), queries 134.2–244.7 ms.
+The unchanged track-A code ran 0.0409 s in the same push (0.0329 s the push before): a slow hour on the box.

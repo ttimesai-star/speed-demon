@@ -81,17 +81,17 @@ fn nw(d: &[u8], s: usize, n: usize, k: usize) -> u64 {
 }
 
 // First slot of the raw name d[s..s+n] in the name table: a hash of its length and first 16 bytes, no loop.
-fn name_slot(d: &[u8], s: usize, n: usize) -> usize {
-    let h = (nw(d, s, n, 0) ^ n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    (h ^ nw(d, s, n, 1)).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) as usize >> 40 & (SLOTS - 1)
+fn name_slot(n: usize, w: [u64; 2]) -> usize {
+    let h = (w[0] ^ n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    (h ^ w[1]).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) as usize >> 40 & (SLOTS - 1)
 }
 
 // Dense id of the raw name d[s..s+n] whose first slot is i (see name_slot), shared by all threads. Slot i is
 // t[4i..4i+3]: arena index << 36 | length << 20 | id (bit 63 set, 0 = empty, 1 = being filled), then the
 // name's first 16 bytes, so nine lookups in ten read one cache line; a longer name's further words are in the
 // arena after the table.
-fn name_id(t: &[AtomicU64], d: &[u8], s: usize, n: usize, mut i: usize) -> u64 {
-    let w = |k| nw(d, s, n, k);
+fn name_id(t: &[AtomicU64], d: &[u8], (s, n, mut i, w01): (usize, usize, usize, [u64; 2])) -> u64 {
+    let w = |k: usize| if k < 2 { w01[k] } else { nw(d, s, n, k) };
     loop {
         let mut v = t[4 * i].load(Acquire);
         if v == 0 && t[4 * i].compare_exchange(0, 1, Acquire, Relaxed).is_ok() {
@@ -186,8 +186,8 @@ fn main() {
                     };
                     // Stage 2 of 3: the name's id, then a prefetch for writing (prefetchw) of its word in the
                     // country's bitset; the bit itself is set one record later (stage 3).
-                    let mut mark = |(ns, nn, i, g): (usize, usize, usize, usize)| {
-                        let nid = if nn == 0 { 0 } else { name_id(t, d, ns, nn, i) as usize };
+                    let mut mark = |(x, g): ((usize, usize, usize, [u64; 2]), usize)| {
+                        let nid = if x.1 == 0 { 0 } else { name_id(t, d, x) as usize };
                         let k = g * IDS / 64 + nid / 64;
                         pf::<7, _>(&seen[k]);
                         bit.replace((k, 1u64 << (nid % 64))).map(set);
@@ -210,9 +210,10 @@ fn main() {
                         let v = [1, id, amt, amt, amt, bytes[0] as i64, bytes[1] as i64];
                         merge(&mut agg[g], v);
                         // Stage 1: this record's slot is prefetched, the previous record's name is looked up.
-                        let i = name_slot(d, ns, nn);
+                        let w = [nw(d, ns, nn, 0), nw(d, ns, nn, 1)];
+                        let i = name_slot(nn, w);
                         pf::<3, _>(&t[4 * i]);
-                        pend.replace((ns, nn, i, g)).map(&mut mark);
+                        pend.replace(((ns, nn, i, w), g)).map(&mut mark);
                     };
                     // Structure 64 bytes at a time: a byte is inside quotes when an odd number of quotes precede
                     // it in the record (a "" pair flips twice), so the separators are the commas and LFs outside
