@@ -318,6 +318,7 @@ fn main() {
             let u = q[h] as usize;
             h += 1;
             q.get(h + 4).map(|&x| pre(x as usize));
+            q.get(h + 2).map(|&x| g0.edges(x as usize).for_each(|(v, _)| pf(&own[v]))); // their claims
             for (v, _) in g0.edges(u) {
                 if own[v].load(Relaxed) == 0 && claim(v, t) {
                     (q.push(v as u32), pf(&g0.0[v]));
@@ -344,6 +345,7 @@ fn main() {
     let ip = id.as_mut_ptr() as usize;
     let degs = par(nt, |t| {
         let deg = |i: usize| {
+            ord.get(i + 16).map(|&o| (pf(&g0.0[o as usize]), pf(unsafe { &*(ip as *const u32).add(o as usize) })));
             let o = ord[i] as usize;
             unsafe { *(ip as *mut u32).add(o) = i as u32 };
             g0.0[o + 1] - g0.0[o]
