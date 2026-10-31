@@ -21,6 +21,22 @@ fn load(path: &str) -> &'static [u8] {
 }
 
 
+// Gives the whole pages inside a slice that will not be read again back to the kernel (MADV_DONTNEED): the
+// laid-out part of a stream stops counting while the final lists fill.
+#[cfg(unix)]
+fn release<T>(s: &[T]) {
+    extern "C" {
+        fn madvise(a: *mut u8, len: usize, advice: i32) -> i32;
+    }
+    let (a, b) = (s.as_ptr() as usize, s.as_ptr() as usize + std::mem::size_of_val(s));
+    if b & !4095 > (a + 4095) & !4095 {
+        unsafe { madvise(((a + 4095) & !4095) as *mut u8, (b & !4095) - ((a + 4095) & !4095), 4) };
+    }
+}
+
+#[cfg(not(unix))]
+fn release<T>(_: &[T]) {}
+
 const NONE: u32 = u32::MAX;
 
 // Runs f(0..nt) on nt threads and returns the results in thread order.
@@ -432,7 +448,7 @@ fn main() {
         // where this thread starts in each list: the documents of the threads before it
         let (x, mut cur) = (&pr[t], (0..nterms).map(|w| pr[..t].iter().map(|y| y.st[w][1]).sum()).collect::<Vec<u32>>());
         let set = |w: usize, i: usize| unsafe { (*((ptrs[w] as *const AtomicU64).add(i / 64))).fetch_or(1 << (i % 64), Relaxed) };
-        let mut e = 0;
+        let (mut e, mut done) = (0, 0);
         for (k, &end) in x.ends.iter().enumerate() {
             let mut j = e;
             while j < end as usize {
@@ -447,6 +463,9 @@ fn main() {
                     false => unsafe { *(ptrs[w] as *mut u32).add(cur[w] as usize) = (first[t] + k) as u32 },
                 }
                 cur[w] += !big[w] as u32;
+            }
+            if end as usize - done >= 1 << 19 {
+                (release(&x.stream[done..end as usize]), done = end as usize);
             }
             e = end as usize;
         }
