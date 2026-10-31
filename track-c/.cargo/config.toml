@@ -3,4 +3,4 @@
 # на самой скоринговой машине (README harness), а v3 одинаково собирается и на build-машине доски.
 [build]
 # +prfchw: PREFETCHW (the i5-13500 has it), so the ET0 prefetch hint fetches a line for writing.
-rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+prfchw"]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+prfchw", "-C", "target-feature=+crt-static"]
