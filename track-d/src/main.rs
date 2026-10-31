@@ -229,13 +229,10 @@ fn main() {
         bfs(r, nt as u32, &mut rest);
     }
     lists.push(rest);
-    // The BFS orders laid end to end, each list copied by its own thread.
-    let mut ord = vec![0u32; n];
-    let (op, at) = (ord.as_mut_ptr() as usize, lists.iter().scan(0, |a, l| (*a, *a += l.len()).0.into()).collect::<Vec<usize>>());
-    par(lists.len(), |k| unsafe { std::ptr::copy_nonoverlapping(lists[k].as_ptr(), (op as *mut u32).add(at[k]), lists[k].len()) });
+    let ord: Vec<u32> = lists.concat();
     drop((lists, own));
     // New id of each node and the degrees in the new order, then the offsets, in parallel by position.
-    let mut id = vec![0u32; n]; // every slot is written below
+    let mut id = vec![u32::MAX; n];
     let (ip, ordr, offr) = (id.as_mut_ptr() as usize, &ord, &off);
     let degs = par(nt, |t| {
         (t * n / nt..(t + 1) * n / nt)

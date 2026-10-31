@@ -222,8 +222,7 @@ impl Set {
 
 // What one thread's corpus pass leaves: documents per term, its bitsets, and the flat stream of term ids.
 struct Part {
-    cnt: Vec<u32>,
-    bit: Vec<u32>,
+    st: Vec<[u32; 3]>, // per term: last document, documents in the stream, thread bitset (or NONE)
     stream: Vec<u16>, // term ranks; a rank of 0xFFFF or more is 0xFFFF, high half, low half
     ends: Vec<u32>,
     tb: Vec<Vec<u64>>,
@@ -398,8 +397,7 @@ fn main() {
             (seq.clear(), hits.clear());
             p = end + 1;
         }
-        let (cnt, bit) = (st.iter().map(|e| e[1]).collect(), st.iter().map(|e| e[2]).collect());
-        Part { cnt, bit, stream, ends, tb, found }
+        Part { st, stream, ends, tb, found }
     });
     let mut pres: Vec<Vec<u32>> = vec![vec![]; phr.len()];
     for x in &parts {
@@ -413,12 +411,12 @@ fn main() {
     let pr = &parts;
     let meta = par(nt, |c| {
         (c * nterms / nt..(c + 1) * nterms / nt)
-            .map(|w| pr.iter().map(|x| x.cnt[w] as usize).sum::<usize>())
+            .map(|w| pr.iter().map(|x| x.st[w][1] as usize).sum::<usize>())
             .map(|len| (len, len * 32 >= n))
             .collect::<Vec<_>>()
     })
     .concat();
-    let meta: Vec<(usize, bool)> = meta.iter().enumerate().map(|(w, &(l, b))| (l, b || pr.iter().any(|x| x.bit[w] != NONE))).collect();
+    let meta: Vec<(usize, bool)> = meta.iter().enumerate().map(|(w, &(l, b))| (l, b || pr.iter().any(|x| x.st[w][2] != NONE))).collect();
     // All lists in one zeroed buffer: one mapping, whose pages are touched only as the layout writes them.
     let mut off = vec![0usize; nterms + 1];
     for w in 0..nterms {
@@ -431,7 +429,7 @@ fn main() {
     let (ptrs, big) = (&ptrs, &big);
     par(nt, |t| {
         // where this thread starts in each list: the documents of the threads before it
-        let (x, mut cur) = (&pr[t], (0..nterms).map(|w| pr[..t].iter().map(|y| y.cnt[w]).sum()).collect::<Vec<u32>>());
+        let (x, mut cur) = (&pr[t], (0..nterms).map(|w| pr[..t].iter().map(|y| y.st[w][1]).sum()).collect::<Vec<u32>>());
         let set = |w: usize, i: usize| unsafe { (*((ptrs[w] as *const AtomicU64).add(i / 64))).fetch_or(1 << (i % 64), Relaxed) };
         let mut e = 0;
         for (k, &end) in x.ends.iter().enumerate() {
@@ -451,8 +449,8 @@ fn main() {
             }
             e = end as usize;
         }
-        for w in (0..nterms).filter(|&w| x.bit[w] != NONE) {
-            for i in members(&Set::Bits(x.tb[x.bit[w] as usize].clone()), first[t]) {
+        for w in (0..nterms).filter(|&w| x.st[w][2] != NONE) {
+            for i in members(&Set::Bits(x.tb[x.st[w][2] as usize].clone()), first[t]) {
                 set(w, i);
             }
         }
