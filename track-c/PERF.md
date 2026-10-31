@@ -37,3 +37,9 @@ A profiling build of the step-9 code plus the arena prefetch (phase times in µs
 aggregation 55,790 µs, written 55,834 µs; T 61.4 ms, so ~5.6 ms are process start and exit. The parse is 51 ms on
 12 threads (612 thread-ms) where the PC needs 23 ms on 8 (184 thread-ms): the board pays 3.3x per thread, more
 than in track A (2.2x), so the name table, arena, bitsets and country map (about 9 MB) cost cache misses there.
+
+## Ablation on the board (run-138c8acedbb3, commit 7fb4dfe)
+
+The step-13 code without setting the bitset bits (wrong on purpose, "hash mismatch"): T 0.0523 s, M 9.8 MB, in a
+push where the unchanged track-A code ran 8 % slower than at night. The shared bitset costs roughly a tenth of T
+and 3.7 MB of M, less than per-thread pair buffers (13 MB) would cost in M points; it stays.

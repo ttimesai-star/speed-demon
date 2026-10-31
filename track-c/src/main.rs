@@ -4,12 +4,14 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
 use std::{env, fs, thread};
 
+extern "C" {
+    fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn madvise(a: *const u8, len: usize, advice: i32) -> i32;
+    fn prctl(op: i32, ...) -> i32;
+}
+
 fn load(path: &str) -> &'static [u8] {
     use std::os::unix::io::AsRawFd;
-    extern "C" {
-        fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-        fn prctl(op: i32, ...) -> i32;
-    }
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) }; // PR_SET_THP_DISABLE: sparse bitsets stay sparse
     let f = fs::File::open(path).unwrap();
     let n = f.metadata().unwrap().len() as usize;
@@ -186,7 +188,7 @@ fn main() {
                         let nid = if nn == 0 { 0 } else { name_id(t, d, ns, nn, i) as usize };
                         let k = g * IDS / 64 + nid / 64;
                         pf::<7, _>(&seen[k]);
-                        bit.replace((k, 1u64 << (nid % 64))).map(|x| x.0 == usize::MAX && { set(x); true }); // ABLATION: no bit set
+                        bit.replace((k, 1u64 << (nid % 64))).map(set);
                     };
                     // One record from its field starts and ends and the quotes in each field: a quoted field
                     // of n bytes holds 2 + 2 * pairs quotes, so its value is n - 1 - quotes / 2 bytes.
@@ -240,6 +242,10 @@ fn main() {
                     }
                     pend.map(&mut mark);
                     bit.map(set);
+                    // MADV_DONTNEED on this thread's pages of the input: the threads unmap them in parallel
+                    // instead of the process exit doing all of it in one thread.
+                    let (a, e) = (bs[k].next_multiple_of(4096), bs[k + 1] / 4096 * 4096);
+                    unsafe { madvise(d.as_ptr().add(a.min(e)), e - a.min(e), 4) };
                     agg
                 })
             })

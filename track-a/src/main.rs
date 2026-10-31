@@ -199,10 +199,11 @@ fn main() {
                 if n <= 32 {
                     v.sort_unstable();
                 } else {
-                    // n >= 25 makes the three ranks distinct, so each select has a non-empty range
-                    v.select_nth_unstable(r[2]);
-                    v[..r[2]].select_nth_unstable(r[1]);
-                    v[..r[1]].select_nth_unstable(r[0]);
+                    // n >= 25 makes the three ranks distinct, so each select has a non-empty range. From the
+                    // bottom up: p95 is searched above p50, p99 above p95 (n + n / 2 + n / 20 element visits).
+                    v.select_nth_unstable(r[0]);
+                    v[r[0] + 1..].select_nth_unstable(r[1] - r[0] - 1);
+                    v[r[1] + 1..].select_nth_unstable(r[2] - r[1] - 1);
                 }
                 buf.extend_from_slice(label.as_bytes());
                 buf.extend_from_slice(ep(s));

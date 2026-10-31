@@ -58,3 +58,10 @@ Phase times in µs since `main` in the name of an extra file in `/out` (the run 
 were checked on the PC). 12 threads: parse done 14,461, first CSR 41,504, BFS order 60,929, new ids and offsets
 70,934, renumbered edges 91,263, reverse CSR 109,421, queries read 109,543, queries done 211,703, written 211,842;
 T 216.9 ms. Construction ~109 ms (the first CSR alone 27 ms), queries ~102 ms.
+
+## Phase profile on the board (run-d6579cbd7e77, commit 7fb4dfe, step 15 code)
+
+Parse 15.4 ms; first CSR: counts done 21.5, edges placed 36.7, end 37.1; parts freed and claim map 40.5; BFS
+ends (last thread) 63.1, leftovers 63.6; new ids, degrees, offsets 71.8; renumbered edges 105.7; reverse CSR 123.6;
+queries 123.7–228.4 ms; T 234.6 ms (a slow push: unchanged track-A code ran 8 % slower too). The renumbered
+copy (34 ms) and the BFS (23 ms) are random reads of rows and ids; step 16 prefetches them.
