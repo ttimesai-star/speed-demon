@@ -36,6 +36,7 @@ Every step from the reference to your final version, each with the live-board ru
 | — | Reverse CSR without decoding (heads counted in one flat pass over a thread's edges, the weight field copied as it is): T 0.1805 s, within the spread; kept in the step-20 rewrite below (commit c50ab09) | run-6e1da88e9011 | 0.1805 | 86.1 | 67.72 |
 | 20 | Prefetches of the neighbours' claim entries in the BFS (original ids are random, so each is a miss) and of the id map and offsets in the renumbering pass; the reverse CSR without decoding; fewer formatted lines (commits c50ab09, 5c01b22, 652aa9f) | run-a569e931c187 | 0.1739 | 85.5 | 68.16 |
 | 21 | A thread whose BFS is done takes blocks of 1,024 node ids from a shared cursor and starts a BFS from every unclaimed one, so no thread waits for the largest region and the serial leftover pass is gone (commit 20292da, 0.1769 s); threads started as a tree on top of it (commit 94df5e1, 0.1781 s, S +12) was not faster against track B of the same pushes and was reverted | run-358fe7c3d9d6 | 0.1769 | 83.8 | 68.07 |
+| 22 | `mallopt(M_MMAP_THRESHOLD, 64 KB)`, as in track A: freed mid-size buffers leave M at once instead of staying in the allocator's arena. M 83–90 → 81.3 MB (commit 82366a7) | run-73ab484816e1 | 0.1762 | 81.3 | 68.23 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 

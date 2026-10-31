@@ -142,6 +142,7 @@ The three percentile selects and the formatting are two thirds of the output pha
 | — | Four chunks per thread from an atomic counter (the threads finished their parts up to 2.4 ms apart): T 0.0326 s, M 28.8 → 32.4 MB (each thread fills more hours), S +10; reverted (commit c0ce2f4) | run-57dcdc470149 | 0.0326 | 32.4 | 78.79 |
 | — | Threads of both phases started as a tree (thread t spawns 2t + 1 and 2t + 2): T 0.0340 s with S 228; against the unchanged track B of the same push about 9 % slower than step 17; reverted (commit 94df5e1) | run-6af3ab31b041 | 0.0340 | 28.7 | 78.78 |
 | 18 | `mallopt(M_MMAP_THRESHOLD, 64 KB)`: glibc raises its mmap threshold after each large free, so the hours' records freed during the output stayed in the arena; with the threshold fixed they go back at once. M 29.0 → 26.8 MB, T unchanged (commit 0f20302) | run-2e4a68da0bef | 0.0309 | 26.8 | 80.29 |
+| — | Step 18 again: 0.0292 s, M 27.2 MB, 80.84 points (commit 82366a7) | run-da36d3a4aa55 | 0.0292 | 27.2 | 80.84 |
 
 ## Phase profile on the board (run-b4b45c8ccc94, commit e62df42, step 17 code)
 
