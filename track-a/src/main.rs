@@ -1,7 +1,7 @@
 // Speed Demon 2026, track A (Ingest). Spec: specs/a-ingest.md in hackathon-raptors/speed-demon-2026.
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::Mutex;
 use std::{env, fs, thread};
 
@@ -49,23 +49,31 @@ fn digits(x: u64) -> u32 {
     (x.wrapping_mul(10000) + (x >> 32)) as u32
 }
 
-// Finds or inserts the endpoint d[s..s+n] in the shared table (key: offset << 8 | length).
-fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
+// Finds or inserts the endpoint d[s..s+n] in the shared table. A new key is copied to a compact arena first
+// (the keys stay in a few cache lines instead of at their first lines in the mapping), then published by CAS
+// as arena offset << 8 | length.
+fn slot(tab: &[AtomicU64], keys: (usize, &AtomicUsize), d: &[u8], s: usize, n: usize, h: u64) -> usize {
     let mut i = (h >> 52) as usize;
     loop {
-        let v = tab[i].load(Relaxed);
-        let v = match v {
-            0 => match tab[i].compare_exchange(0, (s as u64) << 8 | n as u64, Relaxed, Relaxed) {
+        let mut v = tab[i].load(Acquire);
+        if v == 0 {
+            let o = keys.1.fetch_add(n, Relaxed);
+            unsafe { std::ptr::copy_nonoverlapping(d.as_ptr().add(s), (keys.0 as *mut u8).add(o), n) };
+            match tab[i].compare_exchange(0, (o as u64) << 8 | n as u64, Release, Acquire) {
                 Ok(_) => return i,
-                Err(w) => w,
-            },
-            _ => v,
-        };
-        if v & 255 == n as u64 && d[(v >> 8) as usize..][..n] == d[s..s + n] {
+                Err(w) => v = w,
+            }
+        }
+        if v & 255 == n as u64 && key(keys.0, v) == &d[s..s + n] {
             return i;
         }
         i = (i + 1) & (SLOTS - 1);
     }
+}
+
+// The published key bytes of table entry v.
+fn key(arena: usize, v: u64) -> &'static [u8] {
+    unsafe { std::slice::from_raw_parts((arena as *const u8).add((v >> 8) as usize), (v & 255) as usize) }
 }
 
 // Appends " x" in decimal.
@@ -81,7 +89,7 @@ fn put(b: &mut Vec<u8>, mut x: usize) {
 }
 
 // Parses the lines in d[a..b] into per-hour records.
-fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
+fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64], keys: (usize, &AtomicUsize)) -> Vec<Hour> {
     let c = (b - a) / 4096; // ~1.3x the mean hour; small enough that no huge page is touched in vain
     let mut out: Vec<Hour> = (0..HOURS)
         .map(|_| (Vec::with_capacity(c), Vec::with_capacity(c / 4)))
@@ -107,7 +115,7 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
             h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
             p += 8;
         }
-        let sl = slot(tab, d, s, p - s, h) as u16 | ((d[p + 1] == b'5') as u16) << 12;
+        let sl = slot(tab, keys, d, s, p - s, h) as u16 | ((d[p + 1] == b'5') as u16) << 12;
         let w = word(d, p + 5);
         let k = eq_bytes(w, b'\n' as u64).trailing_zeros() as usize / 8;
         let mut v = digits(w << (64 - 8 * k)); // up to 8 digits at once; latency has 1 to 10
@@ -127,13 +135,10 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
 }
 
 fn main() {
-    let t0 = std::time::Instant::now();
-    let us = || t0.elapsed().as_micros();
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) }; // PR_SET_THP_DISABLE: small vectors, no 2 MB pages
     let d = load(&format!("{din}/requests.log"));
-    let tl = us();
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
     let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
     for b in &mut bs[1..] {
@@ -143,28 +148,21 @@ fn main() {
     }
     bs.push(d.len());
     let tab: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
-    let (bs, tb) = (&bs, &tab);
-    let tp = us();
-    let parts: Vec<(u128, Vec<Hour>, u128)> = thread::scope(|sc| {
+    let (arena, top) = (vec![0u8; SLOTS * 256].leak().as_mut_ptr() as usize, AtomicUsize::new(0));
+    let (bs, tb, keys) = (&bs, &tab, (arena, &top));
+    let parts: Vec<Vec<Hour>> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
-            .map(|t| sc.spawn(move || (us(), parse(d, bs[t], bs[t + 1], tb), us())))
+            .map(|t| sc.spawn(move || parse(d, bs[t], bs[t + 1], tb, keys)))
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    let tj = us();
-    let mut st: Vec<u128> = parts.iter().map(|x| x.0).collect();
-    let mut en: Vec<u128> = parts.iter().map(|x| x.2).collect();
-    (st.sort(), en.sort());
-    let parts: Vec<Vec<Hour>> = parts.into_iter().map(|x| x.1).collect();
     let mut hours: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::new(Vec::new())).collect();
     for (h, x) in parts.into_iter().flat_map(|p| p.into_iter().enumerate()) {
         hours[h].get_mut().unwrap().push(x);
     }
-    let key = |s: usize| tab[s].load(Relaxed);
-    let ep = |s: usize| &d[(key(s) >> 8) as usize..][..(key(s) & 255) as usize];
-    let mut order: Vec<usize> = (0..SLOTS).filter(|&s| key(s) != 0).collect();
+    let ep = |s: usize| key(arena, tab[s].load(Acquire));
+    let mut order: Vec<usize> = (0..SLOTS).filter(|&s| tab[s].load(Relaxed) != 0).collect();
     order.sort_unstable_by_key(|&s| ep(s));
-    let tg = us();
     fs::create_dir_all(&dout).unwrap();
     let f = fs::File::create(format!("{dout}/summary.txt")).unwrap();
     // Workers take hours in order; whoever holds `ready` writes every finished buffer that is next.
@@ -231,12 +229,5 @@ fn main() {
             }
         }
     };
-    let tw = us();
-    let mut fin: Vec<u128> = thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|_| sc.spawn(|| (work(), us()).1)).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    fin.sort();
-    let name = format!("A_nt{nt}_l{tl}_b{tp}_s{}-{}_e{}-{}-{}_j{tj}_g{tg}_w{tw}_f{}-{}-{}_x{}", st[0], st[nt - 1], en[0], en[nt / 2], en[nt - 1], fin[0], fin[nt / 2], fin[nt - 1], us());
-    fs::write(format!("{dout}/{name}"), b"").unwrap();
+    thread::scope(|sc| (0..nt).for_each(|_| drop(sc.spawn(&work))));
 }

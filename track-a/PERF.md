@@ -105,3 +105,12 @@ Every A/B binary is run 15–21 times and each run's hash is recorded: one hash 
 - **pread in 128 KB blocks per thread instead of mmap**, endpoint keys copied to an arena (commit 43b86ce): board
   0.0320 s, M 29.2 MB, but S 210 → 249: 79.07 points against 79.48 (run-d6231b519602). Faulting the mapping in is
   not where the board loses time. Reverted.
+
+## Phase profile on the board (run-5db9c3f80e78, commit 3343b2c)
+
+A profiling build wrote its phase times (µs since `main`) into the name of an extra file in `/out`; the
+run fails on purpose ("found [...]" in the public failure text), the summary itself was correct (checked on the PC).
+12 threads: mmap 13 µs, line starts 96 µs, threads started 190–792 µs, parse ends 19,281 / 19,597 / 19,859 µs
+(first / median / last), regroup and endpoint order 20,337 µs, output workers end 27,784 / 28,558 / 29,899 µs,
+`main` returns at 29,966 µs; T 33.5 ms, so ~3.5 ms are process start and exit (unmapping the 239 MB input).
+Parse ~19 ms (228 thread-ms; the PC does it in 104 thread-ms), output ~9.5 ms.

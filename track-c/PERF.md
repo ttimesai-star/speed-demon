@@ -24,3 +24,12 @@ Every step from the reference to your final version, each with the live-board ru
 
 Every step: seed 1 sample and full (published hashes), seed 2 sample and full, seed 3 sample and seed 1 tiny
 (hashes of the reference run locally on the same generated data), and the spec's worked example byte for byte.
+
+## Phase profile on the board (run-b4212a90d5b4, commit 3343b2c)
+
+A profiling build of the step-9 code plus the arena prefetch (phase times in µs in the name of an extra file in
+`/out`, so the run fails on purpose; the aggregates were correct on the PC). 12 threads: `regions.csv` done at
+3,348 µs (serial), chunk starts 3,445 µs, threads started 3,635–4,151 µs, parse ends 54,503 / 54,968 / 55,488 µs,
+aggregation 55,790 µs, written 55,834 µs; T 61.4 ms, so ~5.6 ms are process start and exit. The parse is 51 ms on
+12 threads (612 thread-ms) where the PC needs 23 ms on 8 (184 thread-ms): the board pays 3.3x per thread, more
+than in track A (2.2x), so the name table, arena, bitsets and country map (about 9 MB) cost cache misses there.
