@@ -139,3 +139,9 @@ The three percentile selects and the formatting are two thirds of the output pha
 | 16 | Statically linked (`+crt-static` in the Dockerfile's build flags): no dynamic loader at start; a second try after the first one landed in a slow hour (commit 25001e9) | run-c3dfec7c4274 | 0.0320 | 30.1 | 79.45 |
 | — | Step 16 code again (no change): 0.0308 s, the best T so far, 79.97 points (commit c50ab09) | run-f974cfbbebab | 0.0308 | 29.3 | 79.97 |
 | 17 | Endpoints identified by their 64-bit hash: the table holds the hashes, a second array the first occurrence for the output only; no key bytes are read or compared per line. Two of the 1,842 templates share a hash with a chance of about 1,842^2 / 2^65, below 10^-12 (all eight local datasets match). PC parse one thread 88.5 → 57.1 ms, 8 threads 15.7 → 10.3 ms (commit 63f1d90) | run-3b77efb47584 | 0.0294 | 28.8 | 80.56 |
+
+## Phase profile on the board (run-b4b45c8ccc94, commit e62df42, step 17 code)
+
+12 threads: started 0.26–1.18 ms, parse ends 17.6 / 18.7 / 20.0 ms (first / median / last), regroup and order
+20.6, output workers end 27.8 / 28.5 / 29.2, `main` returns 29.3 ms; T 30.3 ms. The exit is ~1 ms now (it was
+3.5 ms before the per-thread `madvise` and the static link). The threads finish their parts up to 2.4 ms apart.

@@ -83,11 +83,14 @@ fn put(b: &mut Vec<u8>, mut x: usize) {
 }
 
 // Parses the lines in d[a..b] into per-hour records.
-fn parse(d: &[u8], a: usize, b: usize, tab: &(Vec<AtomicU64>, Vec<AtomicU64>)) -> Vec<Hour> {
-    let c = (b - a) / 4096; // ~1.3x the mean hour; small enough that no huge page is touched in vain
+// Parses chunks d[bs[k]..bs[k + 1]], k taken from `next` until none is left (four per thread: the threads
+// finish together), into this thread's per-hour records.
+fn parse(d: &[u8], next: &AtomicUsize, bs: &[usize], tab: &(Vec<AtomicU64>, Vec<AtomicU64>)) -> Vec<Hour> {
+    let c = d.len() / bs.len() / 1024; // ~1.3x the mean hour of a thread; no huge page is touched in vain
     let mut out: Vec<Hour> = (0..HOURS)
         .map(|_| (Vec::with_capacity(c), Vec::with_capacity(c / 4)))
         .collect();
+    while let Some(&[a, b]) = bs.get(next.fetch_add(1, Relaxed)..).and_then(|x| x.get(..2)) {
     let mut i = a;
     while i < b {
         let t = word(d, i + 5); // "MM-DDTHH" without the first month digit
@@ -129,19 +132,17 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &(Vec<AtomicU64>, Vec<AtomicU64>)) -
     // MADV_DONTNEED on the whole pages of d[a..b]: unmapped here in parallel, not at the exit in one thread
     let (p, e) = (a.next_multiple_of(4096).min(b), b / 4096 * 4096);
     unsafe { madvise(d.as_ptr().add(p.min(e)), e - p.min(e), 4) };
+    }
     out
 }
 
 fn main() {
-    let t0 = std::time::Instant::now();
-    let us = || t0.elapsed().as_micros();
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) }; // PR_SET_THP_DISABLE: small vectors, no 2 MB pages
     let d = load(&format!("{din}/requests.log"));
-    let tl = us();
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
-    let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
+    let mut bs: Vec<usize> = (0..4 * nt).map(|k| k * d.len() / (4 * nt)).collect();
     for b in &mut bs[1..] {
         while *b > 0 && *b < d.len() && d[*b - 1] != b'\n' {
             *b += 1; // to a line start
@@ -150,19 +151,13 @@ fn main() {
     bs.push(d.len());
     let new = || (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let tab: (Vec<AtomicU64>, Vec<AtomicU64>) = (new(), new());
-    let (bs, tb) = (&bs, &tab);
-    let tp = us();
-    let parts: Vec<(u128, Vec<Hour>, u128)> = thread::scope(|sc| {
+    let (bs, tb, next) = (&bs, &tab, &AtomicUsize::new(0));
+    let parts: Vec<Vec<Hour>> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
-            .map(|t| sc.spawn(move || (us(), parse(d, bs[t], bs[t + 1], tb), us())))
+            .map(|_| sc.spawn(move || parse(d, next, bs, tb)))
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    let tj = us();
-    let mut st: Vec<u128> = parts.iter().map(|x| x.0).collect();
-    let mut en: Vec<u128> = parts.iter().map(|x| x.2).collect();
-    (st.sort(), en.sort());
-    let parts: Vec<Vec<Hour>> = parts.into_iter().map(|x| x.1).collect();
     let mut hours: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::new(Vec::new())).collect();
     for (h, x) in parts.into_iter().flat_map(|p| p.into_iter().enumerate()) {
         hours[h].get_mut().unwrap().push(x);
@@ -171,7 +166,6 @@ fn main() {
     let ep = |s: usize| &d[(key(s) >> 8) as usize..][..(key(s) & 255) as usize];
     let mut order: Vec<usize> = (0..SLOTS).filter(|&s| key(s) != 0).collect();
     order.sort_unstable_by_key(|&s| ep(s));
-    let tg = us();
     fs::create_dir_all(&dout).unwrap();
     let f = fs::File::create(format!("{dout}/summary.txt")).unwrap();
     // Workers take hours in order; whoever holds `ready` writes every finished buffer that is next.
@@ -239,12 +233,5 @@ fn main() {
             }
         }
     };
-    let tw = us();
-    let mut fin: Vec<u128> = thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|_| sc.spawn(|| (work(), us()).1)).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    fin.sort();
-    let name = format!("A3_l{tl}_b{tp}_s{}-{}_e{}-{}-{}_j{tj}_g{tg}_w{tw}_f{}-{}-{}_x{}", st[0], st[nt - 1], en[0], en[nt / 2], en[nt - 1], fin[0], fin[nt / 2], fin[nt - 1], us());
-    fs::write(format!("{dout}/{name}"), b"").unwrap();
+    thread::scope(|sc| (0..nt).for_each(|_| drop(sc.spawn(&work))));
 }

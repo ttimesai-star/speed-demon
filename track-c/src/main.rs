@@ -1,7 +1,7 @@
 // Speed Demon 2026, track C (Join). Spec: specs/c-join.md in hackathon-raptors/speed-demon-2026.
 use std::arch::x86_64::*;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering::*};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering::*};
 use std::{env, fs, thread};
 
 extern "C" {
@@ -131,8 +131,6 @@ fn pf<const W: i32, T>(p: &T) {
 }
 
 fn main() {
-    let t0 = std::time::Instant::now();
-    let us = || t0.elapsed().as_micros();
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
     let r = load(&format!("{din}/regions.csv"));
@@ -141,7 +139,7 @@ fn main() {
     // Line starts after the header and near k / nt of each file. For records.csv without a pass over the file:
     // by section 2.2 a note is lowercase words (an LF in it is followed by a letter, a quote or a space-free
     // word) and a name has no LF, so an LF followed by a digit or by the first byte of a BOM ends a record.
-    let starts = |d: &[u8], ok: fn(u8) -> bool| {
+    let starts = |d: &[u8], nt: usize, ok: fn(u8) -> bool| {
         let mut bs = vec![1 + d.iter().position(|&c| c == b'\n').unwrap()];
         for k in 1..nt {
             let from = (k * d.len() / nt).max(bs[k - 1]);
@@ -150,8 +148,8 @@ fn main() {
         }
         (bs.push(d.len()), bs).1
     };
-    let bs = starts(d, |c| c.is_ascii_digit() || c == 0xEF);
-    let rs = starts(r, |_| true);
+    let bs = starts(d, 4 * nt, |c| c.is_ascii_digit() || c == 0xEF); // four chunks per thread, taken in turn
+    let rs = starts(r, nt, |_| true);
     // regions.csv in parallel, by rows: first the codes present (a code is a base-26 number, so the order of
     // the numbers is the byte order), then country[id] = 1 + the rank of its code (0: no such region, and ids
     // are below 10^7). Country index 255 is _UNMATCHED.
@@ -166,24 +164,21 @@ fn main() {
     };
     let has = zeroed::<AtomicU8>(26 * 26 * 26);
     let country = zeroed::<AtomicU8>(10_000_000);
-    let tb = us();
     let t = zeroed::<AtomicU64>(SLOTS);
     let seen = zeroed::<AtomicU64>(256 * IDS / 64);
     // A code is marked present only if it is not yet: twelve threads storing into the same few bytes
     // 200,000 times would pass the cache lines around.
     let present = |key: usize| _ = has[key].load(Relaxed) == 0 && has[key].swap(1, Relaxed) == 0;
-    let (bs, rows, wait) = (&bs, &rows, &std::sync::Barrier::new(nt));
-    let parts: Vec<(Vec<[i64; 7]>, u128, u128, u128)> = thread::scope(|sc| {
+    let (bs, rows, wait, next) = (&bs, &rows, &std::sync::Barrier::new(nt), &AtomicUsize::new(0));
+    let parts: Vec<Vec<[i64; 7]>> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
                 sc.spawn(move || {
-                    let ts = us();
                     rows(k, &mut |_, key| present(key));
                     wait.wait();
                     let rank: Vec<u8> = has.iter().scan(1, |n, h| Some((*n, *n += h.load(Relaxed)).0)).collect();
                     rows(k, &mut |id, key| country[id].store(rank[key], Relaxed));
                     wait.wait();
-                    let tr = us();
                     let (mut agg, mut pend, mut bit) = (vec![ZERO; 256], None, None);
                     let set = |(k, b): (usize, u64)| {
                         if seen[k].load(Relaxed) & b == 0 {
@@ -226,9 +221,10 @@ fn main() {
                     // Structure 64 bytes at a time: a byte is inside quotes when an odd number of quotes precede
                     // it in the record (a "" pair flips twice), so the separators are the commas and LFs outside
                     // quotes, four commas and then the LF per record. q counts the quotes of the field so far.
-                    let (mut f, mut st, mut en, mut qs) = (0, [bs[k]; 5], [0; 5], [0; 5]);
-                    let (mut blk, mut ins, mut q) = (bs[k], 0u64, 0);
-                    while blk < bs[k + 1] {
+                    while let Some(&[a, z]) = bs.get(next.fetch_add(1, Relaxed)..).and_then(|x| x.get(..2)) {
+                    let (mut f, mut st, mut en, mut qs) = (0, [a; 5], [0; 5], [0; 5]);
+                    let (mut blk, mut ins, mut q) = (a, 0u64, 0);
+                    while blk < z {
                         let [qm, cm, lm] = masks(d, blk);
                         let mut inq = qm;
                         for s in [1, 2, 4, 8, 16, 32] {
@@ -236,7 +232,7 @@ fn main() {
                         }
                         inq ^= ins;
                         ins = ((inq as i64) >> 63) as u64;
-                        let mut sep = (cm | lm) & !inq & u64::MAX >> (64 - (bs[k + 1] - blk).min(64));
+                        let mut sep = (cm | lm) & !inq & u64::MAX >> (64 - (z - blk).min(64));
                         let mut left = qm;
                         while sep != 0 {
                             let b = sep.trailing_zeros() as usize;
@@ -251,22 +247,19 @@ fn main() {
                         q += left.count_ones() as usize;
                         blk += 64;
                     }
+                    // MADV_DONTNEED on the chunk's pages of the input: the threads unmap them in parallel
+                    // instead of the process exit doing all of it in one thread.
+                    let (a, e) = (a.next_multiple_of(4096), z / 4096 * 4096);
+                    unsafe { madvise(d.as_ptr().add(a.min(e)), e - a.min(e), 4) };
+                    }
                     pend.map(&mut mark);
                     bit.map(set);
-                    // MADV_DONTNEED on this thread's pages of the input: the threads unmap them in parallel
-                    // instead of the process exit doing all of it in one thread.
-                    let (a, e) = (bs[k].next_multiple_of(4096), bs[k + 1] / 4096 * 4096);
-                    unsafe { madvise(d.as_ptr().add(a.min(e)), e - a.min(e), 4) };
-                    (agg, ts, tr, us())
+                    agg
                 })
             })
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    let tj = us();
-    let mut st: Vec<[u128; 3]> = parts.iter().map(|x| [x.1, x.2, x.3]).collect();
-    st.sort_by_key(|x| x[2]);
-    let parts: Vec<Vec<[i64; 7]>> = parts.into_iter().map(|x| x.0).collect();
     let top = TOP.load(Relaxed);
     assert!((top as usize) < 1 << 20);
     let marked = |k: &usize| has[*k].load(Relaxed) == 1;
@@ -294,6 +287,4 @@ fn main() {
     }
     fs::create_dir_all(&dout).unwrap();
     fs::write(format!("{dout}/aggregates.txt"), out).unwrap();
-    let name = format!("C3_b{tb}_s{}_r{}_e{}-{}-{}_j{tj}_w{}", st[0][0], st[0][1], st[0][2], st[nt / 2][2], st[nt - 1][2], us());
-    fs::write(format!("{dout}/{name}"), b"").unwrap();
 }

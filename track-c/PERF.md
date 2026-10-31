@@ -57,3 +57,8 @@ and 3.7 MB of M, less than per-thread pair buffers (13 MB) would cost in M point
 Ablations on the step-20 code: all of it 117 ms; without any name work 68.5 ms; hashing the name and
 prefetching its slot ~25–35 ms of the difference, the table lookup ~10 ms, the bitset ~8 ms. A 16-byte SSE
 load with a sliding mask for the first 16 name bytes saved 1.4 %: not taken.
+
+## Phase profile on the board (run-c315fdc459ef, commit e62df42, step 20 code)
+
+12 threads: regions done 1.48 ms (parallel; it was 3.35 ms serial), parse ends 38.7 / 39.1 / 40.3 ms, output
+written 40.9 ms; T 42.1 ms. The parse is now nine tenths of T; the threads finish up to 1.6 ms apart.
