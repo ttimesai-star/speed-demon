@@ -122,3 +122,6 @@ Parse ~19 ms (228 thread-ms; the PC does it in 104 thread-ms), output ~9.5 ms.
 Sums over the 12 output workers (µs), then the largest single worker: counting 7,223 / 695, scatter 16,041 /
 1,480, freeing the hour's records 3,237 / 517, select + format 60,377 / 5,396, writer lock + write 7,444 / 1,192.
 The three percentile selects and the formatting are two thirds of the output phase.
+- **Percentile selects from the bottom up** (p50 over the group, p95 above it, p99 above that: about 1.55 n element
+  visits instead of 2.9 n; commit 93bcecc): board 0.0361 s (run-edd1378a829e, 78.24 points), the other tracks ran
+  ~3 % slow in the same push. No gain seen; reverted.

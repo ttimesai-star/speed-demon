@@ -147,6 +147,11 @@ fn wide(off: &[u32], adj: &[(u32, u32)], s: usize, t: usize) -> u64 {
     u64::MAX
 }
 
+// n zeroed atomics from calloc: no pass over them in one thread (7 MB costs milliseconds on the box).
+fn zeroed(n: usize) -> Vec<AtomicU32> {
+    unsafe { std::mem::transmute::<Vec<u32>, Vec<AtomicU32>>(vec![0; n]) }
+}
+
 // Runs f(0..nt) on nt threads and returns the results in thread order.
 fn par<T: Send>(nt: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     let f = &f;
@@ -222,8 +227,8 @@ fn main() {
     drop(parts);
     // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
     // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
-    let own: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(NO)).collect();
-    let claim = |v: usize, t: u32| own[v].compare_exchange(NO, t, Relaxed, Relaxed).is_ok();
+    let own = zeroed(n); // 0: unclaimed, else 1 + the claiming thread
+    let claim = |v: usize, t: u32| own[v].compare_exchange(0, t + 1, Relaxed, Relaxed).is_ok();
     let bfs = |r: usize, t: u32, q: &mut Vec<u32>| {
         if !claim(r, t) {
             return;
@@ -234,7 +239,7 @@ fn main() {
             let u = q[h] as usize;
             h += 1;
             for &(v, _) in &adj[off[u] as usize..off[u + 1] as usize] {
-                if own[v as usize].load(Relaxed) == NO && claim(v as usize, t) {
+                if own[v as usize].load(Relaxed) == 0 && claim(v as usize, t) {
                     q.push(v);
                 }
             }
@@ -245,7 +250,7 @@ fn main() {
         (bfs(t * n / nt, t as u32, &mut q), q).1
     });
     // The leftovers (nodes no BFS reached) are found in parallel, then claimed in one thread.
-    let cand = par(nt, |t| rng(t).filter(|&r| own[r].load(Relaxed) == NO).collect::<Vec<_>>());
+    let cand = par(nt, |t| rng(t).filter(|&r| own[r].load(Relaxed) == 0).collect::<Vec<_>>());
     let mut rest = vec![];
     for r in cand.concat() {
         bfs(r, nt as u32, &mut rest);
@@ -254,7 +259,7 @@ fn main() {
     let ord: Vec<u32> = lists.concat();
     drop((lists, own));
     // New id of each node and the degrees in the new order, then the offsets, in parallel by position.
-    let mut id = vec![NO; n];
+    let mut id = vec![0u32; n]; // calloc: every entry is written below
     let ip = id.as_mut_ptr() as usize;
     let degs = par(nt, |t| {
         let deg = |i: usize| {
@@ -275,7 +280,8 @@ fn main() {
         }
     });
     drop(degs);
-    let mut adj2: Vec<(u32, u32)> = vec![(0, 0); adj.len()];
+    let mut adj2: Vec<(u32, u32)> = Vec::with_capacity(adj.len());
+    unsafe { adj2.set_len(adj.len()) }; // every slot is written below
     let ap2 = adj2.as_mut_ptr() as usize;
     par(nt, |t| {
         for i in rng(t) {
@@ -291,7 +297,7 @@ fn main() {
     // fresh pages are costly on the box). In-degrees counted with atomics, their ends as a parallel prefix
     // sum, each edge placed at its head's end minus one: after the renumbering a head is near its tail, so
     // a thread working a range of tails mostly touches counters no other thread does.
-    let r: Vec<AtomicU32> = (0..=n).map(|_| AtomicU32::new(0)).collect();
+    let r = zeroed(n + 1);
     let row = |u: usize| adj[off[u] as usize..off[u + 1] as usize].iter().map(move |&(v, w)| (u, v, w));
     let rows = |t: usize| rng(t).flat_map(row);
     par(nt, |t| rows(t).for_each(|(_, v, _)| _ = r[v as usize].fetch_add(1, Relaxed)));

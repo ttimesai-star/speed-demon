@@ -24,6 +24,7 @@ Every step from the reference to your final version, each with the live-board ru
 | — | Paged labels: each thread keeps a pool of 4 KB pages (512 nodes of `[u32; 2]`) and a directory per 512 nodes instead of n labels; a search touches a few hundred pages. M 279 → 252 MB (so the peak is in the build, not the searches), T 0.2103 s (+6 % against the best): 61.62 points (commit 43b86ce) | run-9c36700b81eb | 0.2103 | 252.2 | 61.62 |
 | 12 | Memory: the parts (edges bucketed by tail) are freed right after the first CSR, and the reverse CSR is built in the old edge array from atomic in-degree counts (ends as a parallel prefix sum, each edge placed at its head's end minus one; after the renumbering a head is near its tail, so threads rarely share a counter); paged labels from the step before. PC: peak 267 → 210 MB with the 92 MB file read (Windows), 117 → 115 ms. Board: M 279 → 139 MB, T 0.2136 s (commit 3343b2c) | run-783c571ed206 | 0.2136 | 138.8 | 63.92 |
 | 13 | Queries taken in the order of their sources' new ids, so the searches that run at the same time work on nearby parts of the graph and share the L3 (commit eaa8061) | run-97a70a6e5921 | 0.2076 | 137.1 | 64.26 |
+| 14 | The same logic written for fewer formatted lines (tuple structs for the labels and the search halves, one range helper, the per-thread loops through `par`). S 429 → 363 (commit 93bcecc) | run-da19dbb800c2 | 0.2128 | 137.6 | 64.51 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 
