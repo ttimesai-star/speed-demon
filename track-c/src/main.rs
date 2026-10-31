@@ -25,7 +25,7 @@ const SLOTS: usize = 1 << 17; // name table; the generator's pool has 100,000 na
 // Bits per country bitset (only the touched pages cost memory), 2^20 and 8 cache lines: rows exactly 128 KB
 // apart would put the ~200 used lines of every country into the same ~200 of the 2,048 L2 sets.
 const IDS: usize = (1 << 20) + 4096;
-static TOP: AtomicU64 = AtomicU64::new(0); // names (a lost race for a slot leaves an unused id)
+static TOP: AtomicU64 = AtomicU64::new(1); // names from 1, so no slot is 0 (the empty name hashes to 0); a lost race leaves an unused id
 
 // Zeroed atomics from calloc'd memory, so untouched pages are never faulted in.
 fn zeroed<T>(n: usize) -> &'static [T] {
