@@ -89,11 +89,14 @@ impl G {
     fn row(&self, u: usize) -> std::ops::Range<usize> {
         self.0[u] as usize..self.0[u + 1] as usize
     }
+    // The exact weight of edge j, whose field holds the top value.
+    fn big(&self, j: usize) -> u32 {
+        self.2[self.2.binary_search_by_key(&(j as u32), |b| b.0).unwrap()].1
+    }
     // Heads and weights of u's edges.
     fn edges(&self, u: usize) -> impl Iterator<Item = (usize, u64)> + '_ {
         let (r, top, m) = (self.row(u), u32::MAX >> self.3, (1 << self.3) - 1);
-        let big = move |j: usize| self.2[self.2.binary_search_by_key(&(j as u32), |b| b.0).unwrap()].1;
-        let w = move |j: usize, y: u32| (if y == top { big(j) } else { y }) as u64;
+        let w = move |j: usize, y: u32| (if y == top { self.big(j) } else { y }) as u64;
         let it = r.clone().zip(&self.1[r]);
         it.map(move |(j, &x)| ((x & m) as usize, w(j, x >> self.3)))
     }
@@ -385,10 +388,11 @@ fn main() {
     // fresh pages are costly on the box). In-degrees counted with atomics, their ends as a parallel prefix
     // sum, each edge placed at its head's end minus one: after the renumbering a head is near its tail, so
     // a thread working a range of tails mostly touches counters no other thread does.
-    let r = zeroed(n + 1);
-    let gr = &g;
-    let rows = |t: usize| rng(t).flat_map(move |u| gr.edges(u).map(move |e| (u, e)));
-    par(nt, |t| rows(t).for_each(|(_, (v, _))| _ = r[v].fetch_add(1, Relaxed)));
+    // The heads are counted in one flat pass over a thread's edges; the placement copies the weight field
+    // as it is, and looks up an exact weight only for the rare edge whose field holds the top value.
+    let (r, mask) = (zeroed(n + 1), (1u32 << vb) - 1);
+    let span = |t: usize| &g.1[g.0[t * n / nt] as usize..g.0[(t + 1) * n / nt] as usize];
+    par(nt, |t| span(t).iter().for_each(|&x| _ = r[(x & mask) as usize].fetch_add(1, Relaxed)));
     let sums = par(nt, |t| rng(t).map(|v| r[v].load(Relaxed)).sum::<u32>());
     par(nt, |t| {
         let mut a = sums[..t].iter().sum::<u32>();
@@ -402,11 +406,14 @@ fn main() {
     let rp = radj.as_mut_ptr() as usize;
     let mut big = par(nt, |t| {
         let mut big = vec![];
-        for (u, (v, w)) in rows(t) {
-            let j = r[v].fetch_sub(1, Relaxed) - 1;
-            unsafe { *(rp as *mut u32).add(j as usize) = u as u32 | (w as u32).min(top) << vb };
-            if w >= top as u64 {
-                big.push((j, w as u32));
+        for u in rng(t) {
+            for j in g.row(u) {
+                let x = g.1[j];
+                let p = r[(x & mask) as usize].fetch_sub(1, Relaxed) - 1;
+                unsafe { *(rp as *mut u32).add(p as usize) = u as u32 | x & !mask };
+                if x >> vb == top {
+                    big.push((p, g.big(j)));
+                }
             }
         }
         big

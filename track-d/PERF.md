@@ -32,6 +32,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 18 | Labels reset by clearing their pages when a search ends (no lists of touched nodes, one push less per new label; PC 108.7 → 106.1 ms), `MADV_DONTNEED` on each parse thread's part of `graph.txt`, step 17 written for fewer lines (commits 19d3986, 71254f8) | run-adde3c10618f | 0.1802 | 86.4 | 67.93 |
 | — | Reverse edges in the old CSR's edge array (warm pages) instead of fresh memory: T 0.1825 s, M 86.4 → 97.4 MB (the old offsets stayed alive with the partly moved struct); reverted (commit ba83278) | run-9d9dc164116a | 0.1825 | 97.4 | 67.28 |
 | 19 | A radix heap for the searches: Dijkstra pops distances in order and never pushes one below the last pop, so an entry goes to the bucket of its highest bit differing from that pop, and a pop from an empty bucket 0 moves the lowest non-empty bucket down around its minimum; no comparisons to sift. 8.9 M pushes and 7.8 M pops per run (PC count). PC 105.2 → 101.5 ms (commit 2e316bf) | run-0f5261c63464 | 0.1740 | 88.7 | 68.03 |
+| — | Statically linked: T 0.1775 s, within the spread of step 19 (commit 25001e9); kept with the other tracks | run-149b1de1bc2c | 0.1775 | 85.8 | 67.96 |
 
 ## PC measurements (Ryzen 7 9800X3D, 8 threads, Windows build, `fs::read` instead of mmap)
 
