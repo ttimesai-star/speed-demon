@@ -25,7 +25,7 @@ const SLOTS: usize = 1 << 17; // name table; the generator's pool has 100,000 na
 // Bits per country bitset (only the touched pages cost memory), 2^20 and 8 cache lines: rows exactly 128 KB
 // apart would put the ~200 used lines of every country into the same ~200 of the 2,048 L2 sets.
 const IDS: usize = (1 << 20) + 4096;
-static TOP: AtomicU64 = AtomicU64::new(0); // arena words << 20 | names
+static TOP: AtomicU64 = AtomicU64::new(0); // names (a lost race for a slot leaves an unused id)
 
 // Zeroed atomics from calloc'd memory, so untouched pages are never faulted in.
 fn zeroed<T>(n: usize) -> &'static [T] {
@@ -80,39 +80,31 @@ fn nw(d: &[u8], s: usize, n: usize, k: usize) -> u64 {
     word(d, s + 8 * k) & u64::MAX >> (64 - 8 * r).min(63) & 0u64.wrapping_sub((r > 0) as u64)
 }
 
-// First slot of the raw name d[s..s+n] in the name table: a hash of its length and first 16 bytes, no loop.
-fn name_slot(n: usize, w: [u64; 2]) -> usize {
-    let h = (w[0] ^ n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    (h ^ w[1]).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) as usize >> 40 & (SLOTS - 1)
+// A 64-bit hash of the raw name d[s..s+n]: its length, then each word mixed in, then an avalanche.
+fn name_hash(d: &[u8], s: usize, n: usize) -> u64 {
+    let mut h = (n as u64 ^ nw(d, s, n, 0)).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ nw(d, s, n, 1);
+    for k in 2..n.div_ceil(8) {
+        h = (h.rotate_left(23) ^ nw(d, s, n, k)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    let h = (h ^ h >> 31).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    h ^ h >> 29
 }
 
-// Dense id of the raw name d[s..s+n] whose first slot is i (see name_slot), shared by all threads. Slot i is
-// t[4i..4i+3]: arena index << 36 | length << 20 | id (bit 63 set, 0 = empty, 1 = being filled), then the
-// name's first 16 bytes, so nine lookups in ten read one cache line; a longer name's further words are in the
-// arena after the table.
-fn name_id(t: &[AtomicU64], d: &[u8], (s, n, mut i, w01): (usize, usize, usize, [u64; 2])) -> u64 {
-    let w = |k: usize| if k < 2 { w01[k] } else { nw(d, s, n, k) };
+// Dense id of the name with hash h, shared by all threads. A slot holds the low 44 bits of h << 20 | id and its
+// index is the top 17 bits of h, so names count as equal when all 61 bits match: with 100,000 names the chance
+// that any two do is about 100,000^2 / 2^62, below 10^-8. An 8-byte slot per name keeps the table at 1 MB.
+fn name_id(t: &[AtomicU64], h: u64) -> u64 {
+    let (mut i, tag) = ((h >> 47) as usize, h & (1 << 44) - 1);
     loop {
-        let mut v = t[4 * i].load(Acquire);
-        if v == 0 && t[4 * i].compare_exchange(0, 1, Acquire, Relaxed).is_ok() {
-            let words = n.div_ceil(8).saturating_sub(2);
-            let o = TOP.fetch_add((words as u64) << 20 | 1, Relaxed);
-            let (at, id) = (4 * SLOTS + (o >> 20) as usize, (o & 0xFFFFF) + 1);
-            for k in 0..words {
-                t[at + k].store(w(k + 2), Relaxed);
+        let mut v = t[i].load(Acquire);
+        if v == 0 {
+            let id = TOP.fetch_add(1, Relaxed);
+            match t[i].compare_exchange(0, tag << 20 | id, Release, Acquire) {
+                Ok(_) => return id,
+                Err(w) => v = w,
             }
-            t[4 * i + 1].store(w(0), Relaxed);
-            t[4 * i + 2].store(w(1), Relaxed);
-            t[4 * i].store(1 << 63 | (at as u64) << 36 | (n as u64) << 20 | id, Release);
-            return id;
         }
-        while v <= 1 {
-            v = t[4 * i].load(Acquire); // another thread is filling this slot
-        }
-        let (at, l) = ((v >> 36 & 0x7FF_FFFF) as usize, (v >> 20 & 0xFFFF) as usize);
-        let eq = |k: usize, j: usize| t[j].load(Relaxed) == w(k);
-        let long = |k: usize| eq(k, at + k - 2);
-        if (l == n) & eq(0, 4 * i + 1) & eq(1, 4 * i + 2) && (2..n.div_ceil(8)).all(long) {
+        if v >> 20 == tag {
             return v & 0xFFFFF;
         }
         i = (i + 1) & (SLOTS - 1);
@@ -172,7 +164,7 @@ fn main() {
     };
     let has = zeroed::<AtomicU8>(26 * 26 * 26);
     let country = zeroed::<AtomicU8>(10_000_000);
-    let t = zeroed::<AtomicU64>(4 * SLOTS + (1 << 24));
+    let t = zeroed::<AtomicU64>(SLOTS);
     let seen = zeroed::<AtomicU64>(256 * IDS / 64);
     // A code is marked present only if it is not yet: twelve threads storing into the same few bytes
     // 200,000 times would pass the cache lines around.
@@ -195,8 +187,8 @@ fn main() {
                     };
                     // Stage 2 of 3: the name's id, then a prefetch for writing (prefetchw) of its word in the
                     // country's bitset; the bit itself is set one record later (stage 3).
-                    let mut mark = |(x, g): ((usize, usize, usize, [u64; 2]), usize)| {
-                        let nid = (x.1 > 0).then(|| name_id(t, d, x) as usize).unwrap_or(0);
+                    let mut mark = |(h, g): (u64, usize)| {
+                        let nid = name_id(t, h) as usize;
                         let k = g * IDS / 64 + nid / 64;
                         pf::<7, _>(&seen[k]);
                         bit.replace((k, 1u64 << (nid % 64))).map(set);
@@ -222,7 +214,9 @@ fn main() {
                         let v = [1, id, amt, amt, amt, name_bytes as i64, note_bytes as i64];
                         merge(&mut agg[g], v);
                         // Stage 1: this record's slot is prefetched, the previous record's name is looked up.
-                        agg[(ns ^ nn) & 255][0] += 0; // ABLATION: no name work at all
+                        let h = name_hash(d, ns, nn);
+                        pf::<3, _>(&t[(h >> 47) as usize]);
+                        pend.replace((h, g)).map(&mut mark);
                     };
                     // Structure 64 bytes at a time: a byte is inside quotes when an odd number of quotes precede
                     // it in the record (a "" pair flips twice), so the separators are the commas and LFs outside
@@ -265,7 +259,7 @@ fn main() {
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     let top = TOP.load(Relaxed);
-    assert!(((top & 0xFFFFF) as usize) < IDS && 4 * SLOTS + (top >> 20) as usize <= t.len());
+    assert!((top as usize) < 1 << 20);
     let marked = |k: &usize| has[*k].load(Relaxed) == 1;
     let codes: Vec<usize> = (0..has.len()).filter(marked).collect();
     assert!(codes.len() < 255);
@@ -277,7 +271,7 @@ fn main() {
         if a[0] == 0 {
             continue;
         }
-        let used = (top & 0xFFFFF) as usize / 64 + 1; // words that can hold a set bit
+        let used = top as usize / 64 + 1; // words that can hold a set bit
         let names: u32 = seen[g * IDS / 64..][..used].iter().map(|w| w.load(Relaxed).count_ones()).sum();
         match code {
             Some(k) => out.extend([k / 676, k / 26 % 26, k % 26].map(|x| b'A' + x as u8)),
