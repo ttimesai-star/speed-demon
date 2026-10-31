@@ -34,6 +34,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 21 | Four chunks per thread from an atomic counter, so the threads finish together (they finished up to 1.6 ms apart); a chunk starts at a record, the pipeline state carries over (commit c0ce2f4) | run-26cca529e271 | 0.0404 | 10.3 | 76.43 |
 | 22 | Bug fix: name ids start at 1, so no table slot is ever 0. The empty name hashes to 0; when it happened to be the first name inserted (id 0), its slot `tag << 20 | id` was 0 and read as empty, and a second empty name got another id. Found by 30 runs of the worked example (12 wrong) after five runs of each full dataset and the board had all passed; on full data the empty name comes first in roughly one run in a hundred. Every step since 20 is affected; 60 runs of the worked example, 30 of tiny and 20 of sample now give one hash each (commit ebb2a44) | | | | |
 | 23 | The same logic in fewer formatted lines (helper closures for the chunk counter, the rank scan and the popcount): S 265 → 258 (commit 2d18976, pushed as 0bf3aa1) | run-5ac47de7ce96 | 0.0413 | 10.3 | 76.28 |
+| — | Step 23 again: 0.0403 s, 76.55 points (commit 52e6a3d) | run-ea8e26ca4156 | 0.0403 | 10.3 | 76.55 |
 
 ## Correctness checks
 
