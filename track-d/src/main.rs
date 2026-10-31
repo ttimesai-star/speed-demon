@@ -88,10 +88,11 @@ impl G {
     }
     // Heads and weights of u's edges.
     fn edges(&self, u: usize) -> impl Iterator<Item = (usize, u64)> + '_ {
-        let (r, top) = (self.row(u), u32::MAX >> self.3);
-        let big = |j: usize| self.2[self.2.binary_search_by_key(&(j as u32), |b| b.0).unwrap()].1;
-        let w = move |j: usize, x: u32| if x >> self.3 == top { big(j) } else { x >> self.3 };
-        r.clone().zip(&self.1[r]).map(move |(j, &x)| ((x & (1 << self.3) - 1) as usize, w(j, x) as u64))
+        let (r, top, m) = (self.row(u), u32::MAX >> self.3, (1 << self.3) - 1);
+        let big = move |j: usize| self.2[self.2.binary_search_by_key(&(j as u32), |b| b.0).unwrap()].1;
+        let w = move |j: usize, y: u32| (if y == top { big(j) } else { y }) as u64;
+        let it = r.clone().zip(&self.1[r]);
+        it.map(move |(j, &x)| ((x & m) as usize, w(j, x >> self.3)))
     }
 }
 
@@ -197,14 +198,17 @@ fn csr(n: usize, parts: &[(Vec<Vec<u64>>, Vec<(u32, u32, u32)>)], vb: u32) -> G 
     let (c, ub) = (n.div_ceil(kk), bits(n.div_ceil(kk)));
     let each = |k: usize, f: &mut dyn FnMut(usize, u32, u32)| {
         for &x in parts.iter().flat_map(|p| &p.0[k]) {
-            f((x & (1 << ub) - 1) as usize, (x >> ub) as u32 & (1 << vb) - 1, (x >> ub >> vb) as u32);
+            let (u, v) = ((x & (1 << ub) - 1) as usize, (x >> ub) as u32 & (1 << vb) - 1);
+            f(u, v, (x >> ub >> vb) as u32);
         }
-        for &(u, v, w) in parts.iter().flat_map(|p| &p.1).filter(|e| e.0 as usize / c == k) {
-            f(u as usize - k * c, v, w);
+        for &(u, v, w) in parts.iter().flat_map(|p| &p.1) {
+            if u as usize / c == k {
+                f(u as usize - k * c, v, w);
+            }
         }
     };
-    let big = |k: usize| parts.iter().flat_map(|p| &p.1).filter(|e| e.0 as usize / c == k).count();
-    let sizes: Vec<usize> = (0..kk).map(|k| parts.iter().map(|p| p.0[k].len()).sum::<usize>() + big(k)).collect();
+    let size = |k: usize| parts.iter().map(move |p| p.0[k].len() + p.1.iter().filter(|e| e.0 as usize / c == k).count());
+    let sizes: Vec<usize> = (0..kk).map(|k| size(k).sum()).collect();
     let mut off = vec![0u32; n + 1];
     let mut adj = Vec::with_capacity(sizes.iter().sum());
     unsafe { adj.set_len(sizes.iter().sum()) }; // every slot is written below
@@ -258,7 +262,8 @@ fn main() {
     let (c, bs, rng) = (n.div_ceil(nt), &bs, |t: usize| t * n / nt..(t + 1) * n / nt);
     let (vb, ub) = (bits(n), bits(c));
     let parts = par(nt, |t| {
-        let mut l: Vec<Vec<_>> = (0..nt).map(|_| Vec::with_capacity((bs[t + 1] - bs[t]) / 16 / nt)).collect();
+        let cap = (bs[t + 1] - bs[t]) / 16 / nt;
+        let mut l: Vec<Vec<_>> = (0..nt).map(|_| Vec::with_capacity(cap)).collect();
         let (mut p, e, mut big) = (bs[t], bs[t + 1], vec![]);
         while p < e {
             let (u, v, w) = (num(d, &mut p) as usize, num(d, &mut p), num(d, &mut p));
@@ -277,6 +282,7 @@ fn main() {
     // Renumber in BFS order so that nodes near each other in the graph are near each other in memory:
     // one BFS per thread from its own seed, nodes claimed by CAS, then the leftovers.
     let own = zeroed(n); // 0: unclaimed, else 1 + the claiming thread
+    let pre = |x: usize| _ = g0.1.get(g0.0[x] as usize).map(pf); // a row's edges, its offsets are cached
     let claim = |v: usize, t: u32| own[v].compare_exchange(0, t + 1, Relaxed, Relaxed).is_ok();
     let bfs = |r: usize, t: u32, q: &mut Vec<u32>| {
         if !claim(r, t) {
@@ -287,7 +293,7 @@ fn main() {
         while h < q.len() {
             let u = q[h] as usize;
             h += 1;
-            q.get(h + 4).map(|&x| g0.1.get(g0.0[x as usize] as usize).map(pf)); // offsets came with the push
+            q.get(h + 4).map(|&x| pre(x as usize));
             for (v, _) in g0.edges(u) {
                 if own[v].load(Relaxed) == 0 && claim(v, t) {
                     (q.push(v as u32), pf(&g0.0[v]));
@@ -300,7 +306,8 @@ fn main() {
         (bfs(t * n / nt, t as u32, &mut q), q).1
     });
     // The leftovers (nodes no BFS reached) are found in parallel, then claimed in one thread.
-    let cand = par(nt, |t| rng(t).filter(|&r| own[r].load(Relaxed) == 0).collect::<Vec<_>>());
+    let free = |r: &usize| own[*r].load(Relaxed) == 0;
+    let cand = par(nt, |t| rng(t).filter(free).collect::<Vec<_>>());
     let mut rest = vec![];
     for r in cand.concat() {
         bfs(r, nt as u32, &mut rest);
@@ -321,7 +328,10 @@ fn main() {
     });
     let mut off2 = vec![0u32; n + 1];
     let o2 = off2.as_mut_ptr() as usize;
-    let base: Vec<u32> = degs.iter().scan(0, |a, c| (*a, *a += c.iter().sum::<u32>()).0.into()).collect();
+    let mut base = vec![0u32];
+    for c in &degs {
+        base.push(base.last().unwrap() + c.iter().sum::<u32>());
+    }
     par(nt, |t| {
         let mut a = base[t];
         for (k, &g) in degs[t].iter().enumerate() {
@@ -339,7 +349,7 @@ fn main() {
         for i in rng(t) {
             // Three stages ahead: the offsets of row i + 16, the edges of row i + 8, the new ids of row i + 4.
             ord.get(i + 16).map(|&o| pf(&g0.0[o as usize]));
-            ord.get(i + 8).map(|&o| g0.1.get(g0.0[o as usize] as usize).map(pf));
+            ord.get(i + 8).map(|&o| pre(o as usize));
             ord.get(i + 4).map(|&o| g0.edges(o as usize).for_each(|(v, _)| pf(&id[v])));
             for (k, (v, w)) in g0.edges(ord[i] as usize).enumerate() {
                 let j = off2[i] as usize + k;
@@ -386,7 +396,8 @@ fn main() {
     .concat();
     big.sort_unstable();
     r[n].store(m as u32, Relaxed);
-    let rg = G(r.into_iter().map(AtomicU32::into_inner).collect(), radj, big, vb);
+    let roff = r.into_iter().map(AtomicU32::into_inner).collect();
+    let rg = G(roff, radj, big, vb);
     drop(ord);
     let q = fs::read(format!("{din}/queries.txt")).unwrap();
     let (mut qs, mut p) = (vec![], 0);
@@ -403,7 +414,8 @@ fn main() {
     let next = AtomicUsize::new(0);
     par(nt, |_| {
         let mut d = Labels(vec![NO; n.div_ceil(PG)], vec![], vec![], vec![]);
-        let (mut f, mut b) = (Side(0, vec![], BinaryHeap::new()), Side(1, vec![], BinaryHeap::new()));
+        let side = |k| Side(k, vec![], BinaryHeap::new());
+        let (mut f, mut b) = (side(0), side(1));
         while let Some(&i) = qo.get(next.fetch_add(1, Relaxed)) {
             let ((s, t), mut best) = (qs[i], u64::MAX); // MAX: unreachable
             if s == t {

@@ -13,6 +13,7 @@ type Hour = (Vec<u32>, Vec<u16>);
 
 extern "C" {
     fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn madvise(a: *const u8, len: usize, advice: i32) -> i32;
     fn prctl(op: i32, ...) -> i32;
 }
 
@@ -123,6 +124,9 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
         }
         i = p + 1;
     }
+    // MADV_DONTNEED on the whole pages of d[a..b]: unmapped here in parallel, not at the exit in one thread
+    let (p, e) = (a.next_multiple_of(4096).min(b), b / 4096 * 4096);
+    unsafe { madvise(d.as_ptr().add(p.min(e)), e - p.min(e), 4) };
     out
 }
 
