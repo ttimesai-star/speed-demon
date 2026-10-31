@@ -137,3 +137,4 @@ The three percentile selects and the formatting are two thirds of the output pha
 | — | Control: step 14 without the `madvise` (commit 8732957) — 0.0356 s against 0.0329 s with it in the push before; the exit-time unmapping is worth ~2.5 ms | run-8c3d925f7fbd | 0.0356 | 28.9 | 78.51 |
 | 15 | Each parse thread drops its whole pages of the input mapping (`MADV_DONTNEED`) when it is done, in three lines: the unmapping runs in the 12 threads, not in the exit (commit 19d3986, pushed as 71254f8) | run-65d024ce7c5a | 0.0329 | 29.8 | 79.19 |
 | 16 | Statically linked (`+crt-static` in the Dockerfile's build flags): no dynamic loader at start; a second try after the first one landed in a slow hour (commit 25001e9) | run-c3dfec7c4274 | 0.0320 | 30.1 | 79.45 |
+| — | Step 16 code again (no change): 0.0308 s, the best T so far, 79.97 points (commit c50ab09) | run-f974cfbbebab | 0.0308 | 29.3 | 79.97 |

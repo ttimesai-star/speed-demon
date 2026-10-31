@@ -216,8 +216,8 @@ fn csr(n: usize, parts: &[(Vec<Vec<u64>>, Vec<(u32, u32, u32)>)], vb: u32) -> G 
     let (c, ub) = (n.div_ceil(kk), bits(n.div_ceil(kk)));
     let each = |k: usize, f: &mut dyn FnMut(usize, u32, u32)| {
         for &x in parts.iter().flat_map(|p| &p.0[k]) {
-            let (u, v) = ((x & (1 << ub) - 1) as usize, (x >> ub) as u32 & (1 << vb) - 1);
-            f(u, v, (x >> ub >> vb) as u32);
+            let u = (x & (1 << ub) - 1) as usize;
+            f(u, (x >> ub) as u32 & (1 << vb) - 1, (x >> ub >> vb) as u32);
         }
         for &(u, v, w) in parts.iter().flat_map(|p| &p.1) {
             if u as usize / c == k {
@@ -225,8 +225,11 @@ fn csr(n: usize, parts: &[(Vec<Vec<u64>>, Vec<(u32, u32, u32)>)], vb: u32) -> G 
             }
         }
     };
-    let size = |k: usize| parts.iter().map(move |p| p.0[k].len() + p.1.iter().filter(|e| e.0 as usize / c == k).count());
-    let sizes: Vec<usize> = (0..kk).map(|k| size(k).sum()).collect();
+    let mut sizes = vec![0; kk];
+    for p in parts {
+        (0..kk).for_each(|k| sizes[k] += p.0[k].len());
+        p.1.iter().for_each(|e| sizes[e.0 as usize / c] += 1);
+    }
     let mut off = vec![0u32; n + 1];
     let mut adj = Vec::with_capacity(sizes.iter().sum());
     unsafe { adj.set_len(sizes.iter().sum()) }; // every slot is written below
@@ -392,7 +395,8 @@ fn main() {
     // as it is, and looks up an exact weight only for the rare edge whose field holds the top value.
     let (r, mask) = (zeroed(n + 1), (1u32 << vb) - 1);
     let span = |t: usize| &g.1[g.0[t * n / nt] as usize..g.0[(t + 1) * n / nt] as usize];
-    par(nt, |t| span(t).iter().for_each(|&x| _ = r[(x & mask) as usize].fetch_add(1, Relaxed)));
+    let count = |&x: &u32| _ = r[(x & mask) as usize].fetch_add(1, Relaxed);
+    par(nt, |t| span(t).iter().for_each(count));
     let sums = par(nt, |t| rng(t).map(|v| r[v].load(Relaxed)).sum::<u32>());
     par(nt, |t| {
         let mut a = sums[..t].iter().sum::<u32>();
@@ -461,7 +465,8 @@ fn main() {
                         break;
                     }
                 }
-                (f.1 .1.iter_mut().chain(&mut b.1 .1).for_each(Vec::clear), d.release());
+                f.1 .1.iter_mut().chain(&mut b.1 .1).for_each(Vec::clear);
+                d.release();
             }
             ans[i].store(best, Relaxed);
         }

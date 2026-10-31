@@ -1,7 +1,7 @@
 // Speed Demon 2026, track C (Join). Spec: specs/c-join.md in hackathon-raptors/speed-demon-2026.
 use std::arch::x86_64::*;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering::*};
 use std::{env, fs, thread};
 
 extern "C" {
@@ -101,7 +101,8 @@ fn name_id(t: &[AtomicU64], d: &[u8], (s, n, mut i, w01): (usize, usize, usize, 
             for k in 0..words {
                 t[at + k].store(w(k + 2), Relaxed);
             }
-            (t[4 * i + 1].store(w(0), Relaxed), t[4 * i + 2].store(w(1), Relaxed));
+            t[4 * i + 1].store(w(0), Relaxed);
+            t[4 * i + 2].store(w(1), Relaxed);
             t[4 * i].store(1 << 63 | (at as u64) << 36 | (n as u64) << 20 | id, Release);
             return id;
         }
@@ -140,7 +141,8 @@ fn pf<const W: i32, T>(p: &T) {
 fn main() {
     let arg = |i: usize, def: &str| env::args().nth(i).unwrap_or(def.into());
     let (din, dout) = (arg(1, "/data"), arg(2, "/out"));
-    let (r, d) = (load(&format!("{din}/regions.csv")), load(&format!("{din}/records.csv")));
+    let r = load(&format!("{din}/regions.csv"));
+    let d = load(&format!("{din}/records.csv"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
     // Line starts after the header and near k / nt of each file. For records.csv without a pass over the file:
     // by section 2.2 a note is lowercase words (an LF in it is followed by a letter, a quote or a space-free
@@ -154,7 +156,8 @@ fn main() {
         }
         (bs.push(d.len()), bs).1
     };
-    let (bs, rs) = (starts(d, |c| c.is_ascii_digit() || c == 0xEF), starts(r, |_| true));
+    let bs = starts(d, |c| c.is_ascii_digit() || c == 0xEF);
+    let rs = starts(r, |_| true);
     // regions.csv in parallel, by rows: first the codes present (a code is a base-26 number, so the order of
     // the numbers is the byte order), then country[id] = 1 + the rank of its code (0: no such region, and ids
     // are below 10^7). Country index 255 is _UNMATCHED.
@@ -162,18 +165,24 @@ fn main() {
         let mut p = rs[k];
         while p < rs[k + 1] {
             let id = num(r, &mut p) as usize;
-            f(id, r[p + 1..p + 4].iter().fold(0, |k, &c| k * 26 + (c - b'A') as usize));
+            let c = |i: usize| (r[p + i] - b'A') as usize;
+            f(id, c(1) * 676 + c(2) * 26 + c(3));
             p += 5;
         }
     };
-    let (has, country) = (zeroed::<AtomicU8>(26 * 26 * 26), zeroed::<AtomicU8>(10_000_000));
-    let (t, seen) = (zeroed::<AtomicU64>(4 * SLOTS + (1 << 24)), zeroed::<AtomicU64>(256 * IDS / 64));
+    let has = zeroed::<AtomicU8>(26 * 26 * 26);
+    let country = zeroed::<AtomicU8>(10_000_000);
+    let t = zeroed::<AtomicU64>(4 * SLOTS + (1 << 24));
+    let seen = zeroed::<AtomicU64>(256 * IDS / 64);
+    // A code is marked present only if it is not yet: twelve threads storing into the same few bytes
+    // 200,000 times would pass the cache lines around.
+    let present = |key: usize| _ = has[key].load(Relaxed) == 0 && has[key].swap(1, Relaxed) == 0;
     let (bs, rows, wait) = (&bs, &rows, &std::sync::Barrier::new(nt));
     let parts: Vec<Vec<[i64; 7]>> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
                 sc.spawn(move || {
-                    rows(k, &mut |_, key| _ = has[key].load(Relaxed) == 0 && { has[key].store(1, Relaxed); true });
+                    rows(k, &mut |_, key| present(key));
                     wait.wait();
                     let rank: Vec<u8> = has.iter().scan(1, |n, h| Some((*n, *n += h.load(Relaxed)).0)).collect();
                     rows(k, &mut |id, key| country[id].store(rank[key], Relaxed));
@@ -187,7 +196,7 @@ fn main() {
                     // Stage 2 of 3: the name's id, then a prefetch for writing (prefetchw) of its word in the
                     // country's bitset; the bit itself is set one record later (stage 3).
                     let mut mark = |(x, g): ((usize, usize, usize, [u64; 2]), usize)| {
-                        let nid = if x.1 == 0 { 0 } else { name_id(t, d, x) as usize };
+                        let nid = (x.1 > 0).then(|| name_id(t, d, x) as usize).unwrap_or(0);
                         let k = g * IDS / 64 + nid / 64;
                         pf::<7, _>(&seen[k]);
                         bit.replace((k, 1u64 << (nid % 64))).map(set);
@@ -199,15 +208,18 @@ fn main() {
                         let id = num(d, &mut p) as i64;
                         let (n, tn) = (en[1] - st[1], en[2] - st[2]);
                         let (ns, nn) = (st[1] + (n > 0) as usize, n.saturating_sub(2));
-                        let bytes = [n.saturating_sub(1 + qs[1] / 2), tn.saturating_sub(1 + qs[2] / 2)];
+                        let name_bytes = n.saturating_sub(1 + qs[1] / 2);
+                        let note_bytes = tn.saturating_sub(1 + qs[2] / 2);
                         p = st[3];
                         let reg = num(d, &mut p) as usize;
                         pf::<3, _>(&country[reg.min(country.len() - 1)]); // used after the amount is parsed
                         p = st[4] + (d[st[4]] == b'-') as usize;
                         let cents = num(d, &mut p) as i64 * 100 + (d[p + 1] - b'0') as i64 * 10;
-                        let amt = (cents + (d[p + 2] - b'0') as i64) * [1, -1][(d[st[4]] == b'-') as usize];
-                        let g = country.get(reg).map_or(0, |c| c.load(Relaxed)).wrapping_sub(1) as usize;
-                        let v = [1, id, amt, amt, amt, bytes[0] as i64, bytes[1] as i64];
+                        let sign = [1, -1][(d[st[4]] == b'-') as usize];
+                        let amt = (cents + (d[p + 2] - b'0') as i64) * sign;
+                        let c = country.get(reg).map_or(0, |c| c.load(Relaxed));
+                        let g = c.wrapping_sub(1) as usize;
+                        let v = [1, id, amt, amt, amt, name_bytes as i64, note_bytes as i64];
                         merge(&mut agg[g], v);
                         // Stage 1: this record's slot is prefetched, the previous record's name is looked up.
                         let w = [nw(d, ns, nn, 0), nw(d, ns, nn, 1)];
@@ -257,10 +269,12 @@ fn main() {
     });
     let top = TOP.load(Relaxed);
     assert!(((top & 0xFFFFF) as usize) < IDS && 4 * SLOTS + (top >> 20) as usize <= t.len());
-    let codes: Vec<usize> = (0..has.len()).filter(|&k| has[k].load(Relaxed) == 1).collect();
+    let marked = |k: &usize| has[*k].load(Relaxed) == 1;
+    let codes: Vec<usize> = (0..has.len()).filter(marked).collect();
     assert!(codes.len() < 255);
     let mut out = Vec::new();
-    for (g, code) in codes.iter().map(|&k| Some(k)).enumerate().chain([(255, None)]) {
+    let groups = codes.iter().map(|&k| Some(k)).enumerate();
+    for (g, code) in groups.chain([(255, None)]) {
         let mut a = ZERO;
         parts.iter().for_each(|x| merge(&mut a, x[g]));
         if a[0] == 0 {
