@@ -58,6 +58,39 @@ fn edges(d: &[u8], a: usize, b: usize, mut f: impl FnMut(usize, usize, u32)) {
     }
 }
 
+const PG: usize = 512; // nodes per label page (4 KB of [u32; 2])
+
+// Labels of both halves of a search, paged: dir[v / PG] is a page from this thread's pool or u32::MAX (every
+// label unset). A search touches a few hundred pages at most, so a thread keeps that, not n labels.
+struct Labels {
+    dir: Vec<u32>,
+    pages: Vec<[[u32; 2]; PG]>,
+    free: Vec<u32>,
+    used: Vec<u32>,
+}
+
+impl Labels {
+    fn get(&self, v: usize) -> [u32; 2] {
+        match self.dir[v / PG] {
+            u32::MAX => [u32::MAX; 2],
+            p => self.pages[p as usize][v % PG],
+        }
+    }
+    fn at(&mut self, v: usize) -> &mut [u32; 2] {
+        if self.dir[v / PG] == u32::MAX {
+            let p = self.free.pop().unwrap_or_else(|| (self.pages.push([[u32::MAX; 2]; PG]), self.pages.len() as u32 - 1).1);
+            (self.dir[v / PG] = p, self.used.push((v / PG) as u32));
+        }
+        &mut self.pages[self.dir[v / PG] as usize][v % PG]
+    }
+    // Every label is unset again (the sides reset theirs): the pages go back to the pool.
+    fn release(&mut self) {
+        for i in self.used.drain(..) {
+            self.free.push(std::mem::replace(&mut self.dir[i as usize], u32::MAX));
+        }
+    }
+}
+
 // One half (k = 0 forward, 1 backward) of a bidirectional Dijkstra search: touched nodes and a heap of
 // dist << 32 | node. Both halves' u32 labels share one array of pairs, so the meeting check at a settled
 // node reads the cache line its own label is in.
@@ -71,38 +104,40 @@ impl Side {
     fn top(&self) -> u64 {
         self.h.peek().map_or(u64::MAX, |r| r.0 >> 32)
     }
-    fn start(&mut self, d: &mut [[u32; 2]], s: usize) {
-        (d[s][self.k] = 0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
+    fn start(&mut self, d: &mut Labels, s: usize) {
+        (d.at(s)[self.k] = 0, self.seen.push(s as u32), self.h.push(Reverse(s as u64)));
     }
     // Settles the nearest node; `best` takes its sum with the other half's label (checking at settle time
     // is enough for the stop rule top + top >= best). False if a sum does
     // not fit in u32 (the weights near 2^32 on the special nodes): the query then goes to `wide`.
-    fn step(&mut self, off: &[u32], adj: &[(u32, u32)], d: &mut [[u32; 2]], best: &mut u64) -> bool {
+    fn step(&mut self, off: &[u32], adj: &[(u32, u32)], d: &mut Labels, best: &mut u64) -> bool {
         let Reverse(e) = self.h.pop().unwrap();
         let (du, u, k) = (e >> 32, e as u32 as usize, self.k);
-        if du > d[u][k] as u64 {
+        let lu = d.get(u);
+        if du > lu[k] as u64 {
             return true;
         }
-        if d[u][1 - k] != u32::MAX {
-            *best = (*best).min(du + d[u][1 - k] as u64);
+        if lu[1 - k] != u32::MAX {
+            *best = (*best).min(du + lu[1 - k] as u64);
         }
         for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
             let (v, nd) = (v as usize, du + w as u64);
             if nd >= u32::MAX as u64 {
                 return false;
             }
-            if nd < d[v][k] as u64 {
-                if d[v][k] == u32::MAX {
+            let dv = d.get(v)[k];
+            if nd < dv as u64 {
+                if dv == u32::MAX {
                     self.seen.push(v as u32);
                 }
-                (d[v][k] = nd as u32, self.h.push(Reverse(nd << 32 | v as u64)));
+                (d.at(v)[k] = nd as u32, self.h.push(Reverse(nd << 32 | v as u64)));
             }
         }
         true
     }
-    fn reset(&mut self, d: &mut [[u32; 2]]) {
+    fn reset(&mut self, d: &mut Labels) {
         for &v in &self.seen {
-            d[v as usize][self.k] = u32::MAX;
+            d.at(v as usize)[self.k] = u32::MAX;
         }
         (self.seen.clear(), self.h.clear());
     }
@@ -302,7 +337,7 @@ fn main() {
         for _ in 0..nt {
             let (qs, ans, next) = (&qs, &ans, &next);
             sc.spawn(move || {
-                let mut d = vec![[u32::MAX; 2]; n];
+                let mut d = Labels { dir: vec![u32::MAX; n.div_ceil(PG)], pages: vec![], free: vec![], used: vec![] };
                 let (mut f, mut b) = (Side { k: 0, seen: vec![], h: BinaryHeap::new() }, Side { k: 1, seen: vec![], h: BinaryHeap::new() });
                 loop {
                     let i = next.fetch_add(1, Relaxed);
@@ -326,7 +361,7 @@ fn main() {
                                 break;
                             }
                         }
-                        (f.reset(&mut d), b.reset(&mut d));
+                        (f.reset(&mut d), b.reset(&mut d), d.release());
                     }
                     ans[i].store(best, Relaxed);
                 }

@@ -199,12 +199,12 @@ fn main() {
                             seen[k].fetch_or(b, Relaxed);
                         }
                     };
-                    // Stage 2 of 3: the name's id, then a prefetch of its word in the country's bitset; the
+                    // Stage 2 of 3: the name's id, then a prefetch for writing of its word in the country's bitset; the
                     // bit itself is set one record later (stage 3).
                     let mut mark = |(ns, nn, i, g): (usize, usize, usize, usize)| {
                         let nid = if nn == 0 { 0 } else { name_id(tab, arena, top, d, ns, nn, i) } as usize;
                         let k = g * IDS / 64 + nid / 64;
-                        unsafe { std::arch::x86_64::_mm_prefetch::<3>(seen.as_ptr().add(k) as *const i8) };
+                        unsafe { std::arch::x86_64::_mm_prefetch::<7>(seen.as_ptr().add(k) as *const i8) }; // prefetchw: owned before the RMW
                         bit.replace((k, 1u64 << (nid % 64))).map(set);
                     };
                     let mut p = bs[k];
