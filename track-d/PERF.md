@@ -80,3 +80,10 @@ copy (34 ms) and the BFS (23 ms) are random reads of rows and ids; step 16 prefe
 Parse 23.1 ms, packed CSR 40.3, claim map 42.9, BFS 64.6, ids and offsets 75.7, renumbered edges 97.9,
 reverse CSR 134.0 (36 ms: twice the step-15 figure, its edge array was fresh memory), queries 134.2–244.7 ms.
 The unchanged track-A code ran 0.0409 s in the same push (0.0329 s the push before): a slow hour on the box.
+
+## Phase profile on the board (run-f4487692b31d, commit 57baa25, step 20 code)
+
+Parse 15.3 ms, packed CSR 26.9, claim map 29.6, BFS 48.2, ids and offsets 55.6, renumbered edges 70.8, reverse
+CSR 89.3, queries 89.5–174.8, written 174.9 ms; T 177.8 ms. Construction ~89 ms, queries ~85 ms. Per settled node
+the board needs ~130 thread-ns against ~51 on the PC, about the per-core speed ratio: the searches are bound
+by instructions now, not by cache misses.

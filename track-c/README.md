@@ -7,32 +7,35 @@ measured before it is kept; `PERF.md` lists the steps.
 
 ## Approach
 
-Rust, standard library only, one file (`src/main.rs`).
+Rust, standard library only, one file (`src/main.rs`), statically linked.
 
-1. **Regions.** `regions.csv` is mapped and read twice: once to mark the country codes in a 26^3 table (a
-   code is a base-26 number, so the table order is the byte order and the output order; no sort), once to
-   fill a flat `u8` array from region id to country index. `_UNMATCHED` is the last index.
-2. **Chunks without a pre-pass.** Section 2.2, which the spec says may be relied on, fixes what the
-   generator writes: a note is lowercase words (after an LF inside it comes a letter or a quote), and a name
-   never contains an LF. So an LF followed by a digit or by the first byte of a BOM always ends a record, and
-   each chunk starts at the first such LF after its nominal start: a short local scan, no pass over the file.
-   (An earlier version counted the quotes of every chunk and used the parity; same chunks, one more read of
-   202 MB.)
-3. **Parse, all threads.** Each record is read with SWAR: numbers eight digits at a time, the closing quote
-   or comma of a field eight bytes at a time; an optional BOM, the id, two text fields
-   (quoted: scan to the next `"`, a `""` pair counts as one byte; unquoted: up to the comma), the region id,
-   the amount in integer cents, and CRLF or LF. `name_bytes` and `note_bytes` are the raw length minus the
-   number of `""` pairs.
-4. **Distinct names.** Unescaping is a bijection on the raw bytes between the quotes (every `"` inside is
-   doubled), so names are compared by their raw bytes. A shared lock-free table gives each distinct name a dense id: a new
-   name is copied into a compact arena, then published by CAS as one word (arena offset, length, id); lookups
-   compare eight bytes at a time against the arena copy;
-   the empty name, quoted or not, is id 0. The lookup is a three-stage software pipeline: a record's table
-   slot is prefetched, the previous record's name is resolved and its word in the country bitset prefetched,
-   and the bit of the record before that is set. Each country has a bitset of name ids, set with an atomic OR;
-   `names_distinct` is its popcount. The bitsets live in zeroed memory, so only the touched pages cost.
-5. **Merge and output.** Per-thread sums, minima and maxima per country are merged in country order; money is
-   printed from integer cents (`-0.05`, never `-0.00`).
+1. **Chunks without a pre-pass.** Both files are mapped with `mmap`. Section 2.2, which the spec says may be
+   relied on, fixes what the generator writes: a note is lowercase words (after an LF inside it comes a
+   letter or a quote), and a name never contains an LF. So an LF followed by a digit or by the first byte of a
+   BOM always ends a record, and each thread's chunk starts at the first such LF after its nominal start.
+2. **Regions, all threads.** Each thread parses a slice of `regions.csv` twice behind a barrier: first it
+   marks the country codes present in a 26^3 table (a code is a base-26 number, so table order is byte order
+   and output order; no sort), then it writes `1 + rank` of each region's code into a byte map indexed by
+   region id (zeroed memory; 0 means no such region, which is `_UNMATCHED`).
+3. **Structure, 64 bytes at a time.** AVX2 compares give bit masks of quotes, commas and LFs; a prefix XOR of
+   the quote bits marks the quoted spans (a `""` pair flips twice, so it stays inside), and the separators
+   are the commas and LFs outside them: four commas and then the LF per record. The popcount of the quote
+   bits inside a field gives its `""` pairs, so `name_bytes` and `note_bytes` are the field length minus one
+   minus half its quotes, with no byte-by-byte scan. Numbers are parsed eight digits at a time (SWAR).
+4. **Distinct names.** Unescaping is a bijection on the raw bytes between the quotes, so names are hashed on
+   their raw bytes. A shared lock-free table maps a name's 64-bit hash to a dense id: an 8-byte slot holds 44
+   hash bits and the id, the slot index is 17 more bits, so two names count as equal only when all 61 bits
+   match; with 100,000 names that happens with a chance below 10^-8. The table is 1 MB. Each country has a
+   bitset of name ids (rows a few cache lines more than 2^20 bits apart, so they do not share L2 sets), set
+   with an atomic OR after a plain load; `names_distinct` is its popcount. The lookup is a three-stage
+   pipeline: a record's slot is prefetched, the previous record's id is found and its bitset word prefetched
+   for writing, the bit of the record before that is set.
+5. **Merge and output.** Each thread drops its pages of the input mapping when done (`MADV_DONTNEED`).
+   Per-thread sums, minima and maxima per country are merged in country order; money is printed from integer
+   cents (`-0.05`, never `-0.00`).
+
+Checked on every step: the published hashes (seed 1 sample and full), the reference run locally (seed 2
+sample and full, seeds 3 and 4 sample, seed 1 tiny) and the spec's worked example; five runs give one hash.
 
 ## Dependencies
 

@@ -51,3 +51,9 @@ than in track A (2.2x), so the name table, arena, bitsets and country map (about
 The step-13 code without setting the bitset bits (wrong on purpose, "hash mismatch"): T 0.0523 s, M 9.8 MB, in a
 push where the unchanged track-A code ran 8 % slower than at night. The shared bitset costs roughly a tenth of T
 and 3.7 MB of M, less than per-thread pair buffers (13 MB) would cost in M points; it stays.
+
+## After step 20 (PC, one thread, seed 1 full)
+
+Ablations on the step-20 code: all of it 117 ms; without any name work 68.5 ms; hashing the name and
+prefetching its slot ~25–35 ms of the difference, the table lookup ~10 ms, the bitset ~8 ms. A 16-byte SSE
+load with a sliding mask for the first 16 name bytes saved 1.4 %: not taken.
