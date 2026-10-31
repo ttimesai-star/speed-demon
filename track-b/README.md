@@ -35,8 +35,10 @@ Rust, standard library only, one file (`src/main.rs`).
 
 ## Memory
 
-All final lists live in one buffer, touched only by the layout; a term's list borrows its slice of it, so a
-query that starts from a term copies nothing. Frequent terms are bitsets of all documents (31 KB each).
+The thread streams hold `u16` term ranks (terms ranked by the sampled counts, an escape for the rare tail).
+All final lists live in one buffer, touched only by the layout, while the laid-out part of each stream is
+handed back to the kernel; a term's list borrows its slice of the buffer, so a query that starts from a term
+copies nothing. Frequent terms are bitsets of all documents (31 KB each).
 
 ## Dependencies
 
