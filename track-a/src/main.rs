@@ -50,19 +50,20 @@ fn digits(x: u64) -> u32 {
     (x.wrapping_mul(10000) + (x >> 32)) as u32
 }
 
-// Finds or inserts the endpoint d[s..s+n] in the shared table (key: offset << 8 | length).
-fn slot(tab: &[AtomicU64], d: &[u8], s: usize, n: usize, h: u64) -> usize {
+// Finds or inserts the endpoint d[s..s+n] by its 64-bit hash h (never 0): .0 holds the hashes, .1 the first
+// occurrence (offset << 8 | length) for the output. Two of the 1,842 templates share a hash with a chance of
+// about 1,842^2 / 2^65, below 10^-12; comparing hashes instead of bytes takes the key reads off each line.
+fn slot(tab: &(Vec<AtomicU64>, Vec<AtomicU64>), s: usize, n: usize, h: u64) -> usize {
     let mut i = (h >> 52) as usize;
     loop {
-        let v = tab[i].load(Relaxed);
-        let v = match v {
-            0 => match tab[i].compare_exchange(0, (s as u64) << 8 | n as u64, Relaxed, Relaxed) {
-                Ok(_) => return i,
-                Err(w) => w,
-            },
-            _ => v,
-        };
-        if v & 255 == n as u64 && d[(v >> 8) as usize..][..n] == d[s..s + n] {
+        let mut v = tab.0[i].load(Relaxed);
+        if v == 0 {
+            match tab.0[i].compare_exchange(0, h, Relaxed, Relaxed) {
+                Ok(_) => return (tab.1[i].store((s as u64) << 8 | n as u64, Relaxed), i).1,
+                Err(w) => v = w,
+            }
+        }
+        if v == h {
             return i;
         }
         i = (i + 1) & (SLOTS - 1);
@@ -82,7 +83,7 @@ fn put(b: &mut Vec<u8>, mut x: usize) {
 }
 
 // Parses the lines in d[a..b] into per-hour records.
-fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
+fn parse(d: &[u8], a: usize, b: usize, tab: &(Vec<AtomicU64>, Vec<AtomicU64>)) -> Vec<Hour> {
     let c = (b - a) / 4096; // ~1.3x the mean hour; small enough that no huge page is touched in vain
     let mut out: Vec<Hour> = (0..HOURS)
         .map(|_| (Vec::with_capacity(c), Vec::with_capacity(c / 4)))
@@ -108,7 +109,8 @@ fn parse(d: &[u8], a: usize, b: usize, tab: &[AtomicU64]) -> Vec<Hour> {
             h = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
             p += 8;
         }
-        let sl = slot(tab, d, s, p - s, h) as u16 | ((d[p + 1] == b'5') as u16) << 12;
+        let h = (h ^ h >> 29).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) | 1;
+        let sl = slot(tab, s, p - s, h ^ h >> 32) as u16 | ((d[p + 1] == b'5') as u16) << 12;
         let w = word(d, p + 5);
         let k = eq_bytes(w, b'\n' as u64).trailing_zeros() as usize / 8;
         let mut v = digits(w << (64 - 8 * k)); // up to 8 digits at once; latency has 1 to 10
@@ -143,7 +145,8 @@ fn main() {
         }
     }
     bs.push(d.len());
-    let tab: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
+    let new = || (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
+    let tab: (Vec<AtomicU64>, Vec<AtomicU64>) = (new(), new());
     let (bs, tb) = (&bs, &tab);
     let parts: Vec<Vec<Hour>> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
@@ -155,7 +158,7 @@ fn main() {
     for (h, x) in parts.into_iter().flat_map(|p| p.into_iter().enumerate()) {
         hours[h].get_mut().unwrap().push(x);
     }
-    let key = |s: usize| tab[s].load(Relaxed);
+    let key = |s: usize| tab.1[s].load(Relaxed);
     let ep = |s: usize| &d[(key(s) >> 8) as usize..][..(key(s) & 255) as usize];
     let mut order: Vec<usize> = (0..SLOTS).filter(|&s| key(s) != 0).collect();
     order.sort_unstable_by_key(|&s| ep(s));

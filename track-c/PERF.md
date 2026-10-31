@@ -30,6 +30,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 17 | The first 16 name bytes are read once per record and carried through the pipeline: the hash and the compare share them (PC one thread 137.6 → 131.5 ms) (commit ba83278) | run-b2396887a6ba | 0.0484 | 13.6 | 72.90 |
 | 18 | Statically linked (`+crt-static` in `.cargo/config.toml`, no line of code) (commit 25001e9) | run-4632b89c3375 | 0.0482 | 13.2 | 73.08 |
 | 19 | The same logic written for fewer formatted lines (one-line imports, no long tuples or chains, `then` instead of `if`/`else`): S 297 → 263. Its first run took 0.0651 s in a slow push (the PC showed 2–4 %), the second 0.0481 s (commits 5c01b22, 652aa9f) | run-73829cd50880 | 0.0481 | 13.4 | 73.43 |
+| 20 | Names identified by a 64-bit hash: an 8-byte slot holds 44 hash bits and the id, the slot index is 17 more bits, so two names count as equal only if all 61 bits match; with 100,000 names the chance that any two do is about 100,000^2 / 2^62, below 10^-8 per dataset (all eight local datasets match their reference hashes). The table is 1 MB instead of 4 MB of inline keys and no bytes are compared. PC one thread 142 → 120 ms, 8 threads 22.5 → 19.1 ms (commit 65a830e) | run-c21f5e3b4e84 | 0.0416 | 10.5 | 76.16 |
 
 ## Correctness checks
 
