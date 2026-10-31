@@ -348,6 +348,7 @@ fn main() {
     order.sort_by_key(|&w| std::cmp::Reverse(est.iter().map(|c| c[w as usize]).sum::<u32>()));
     let mut rank = vec![0u32; nterms];
     order.iter().enumerate().for_each(|(r, &w)| rank[w as usize] = r as u32);
+    drop(est);
     let (rank, order) = (&rank, &order);
     let (dict, trig, tf, phr, bs, first) = (dict, &trig, &tf, &phr, &bs, &first);
     let parts = par(nt, |t| {
