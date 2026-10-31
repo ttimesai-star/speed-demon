@@ -326,18 +326,19 @@ fn main() {
             }
         }
     };
-    let mut lists = par(nt, |t| {
+    // A thread whose BFS is done takes blocks of 1,024 node ids from a shared cursor and starts a BFS from
+    // each node there that is still unclaimed, so no thread waits for the largest region and no node is left.
+    let cursor = AtomicUsize::new(0);
+    let lists = par(nt, |t| {
         let mut q = Vec::with_capacity(2 * n / nt);
-        (bfs(t * n / nt, t as u32, &mut q), q).1
+        bfs(t * n / nt, t as u32, &mut q);
+        let mut b = cursor.fetch_add(1024, Relaxed);
+        while b < n {
+            (b..(b + 1024).min(n)).for_each(|r| bfs(r, t as u32, &mut q));
+            b = cursor.fetch_add(1024, Relaxed);
+        }
+        q
     });
-    // The leftovers (nodes no BFS reached) are found in parallel, then claimed in one thread.
-    let free = |r: &usize| own[*r].load(Relaxed) == 0;
-    let cand = par(nt, |t| rng(t).filter(free).collect::<Vec<_>>());
-    let mut rest = vec![];
-    for r in cand.concat() {
-        bfs(r, nt as u32, &mut rest);
-    }
-    lists.push(rest);
     let ord: Vec<u32> = lists.concat();
     drop((lists, own));
     // New id of each node and the degrees in the new order, then the offsets, in parallel by position.

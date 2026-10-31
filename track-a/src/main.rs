@@ -83,14 +83,11 @@ fn put(b: &mut Vec<u8>, mut x: usize) {
 }
 
 // Parses the lines in d[a..b] into per-hour records.
-// Parses chunks d[bs[k]..bs[k + 1]], k taken from `next` until none is left (four per thread: the threads
-// finish together), into this thread's per-hour records.
-fn parse(d: &[u8], next: &AtomicUsize, bs: &[usize], tab: &(Vec<AtomicU64>, Vec<AtomicU64>)) -> Vec<Hour> {
-    let c = d.len() / bs.len() / 1024; // ~1.3x the mean hour of a thread; no huge page is touched in vain
+fn parse(d: &[u8], a: usize, b: usize, tab: &(Vec<AtomicU64>, Vec<AtomicU64>)) -> Vec<Hour> {
+    let c = (b - a) / 4096; // ~1.3x the mean hour; small enough that no huge page is touched in vain
     let mut out: Vec<Hour> = (0..HOURS)
         .map(|_| (Vec::with_capacity(c), Vec::with_capacity(c / 4)))
         .collect();
-    while let Some(&[a, b]) = bs.get(next.fetch_add(1, Relaxed)..).and_then(|x| x.get(..2)) {
     let mut i = a;
     while i < b {
         let t = word(d, i + 5); // "MM-DDTHH" without the first month digit
@@ -132,7 +129,6 @@ fn parse(d: &[u8], next: &AtomicUsize, bs: &[usize], tab: &(Vec<AtomicU64>, Vec<
     // MADV_DONTNEED on the whole pages of d[a..b]: unmapped here in parallel, not at the exit in one thread
     let (p, e) = (a.next_multiple_of(4096).min(b), b / 4096 * 4096);
     unsafe { madvise(d.as_ptr().add(p.min(e)), e - p.min(e), 4) };
-    }
     out
 }
 
@@ -142,7 +138,7 @@ fn main() {
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) }; // PR_SET_THP_DISABLE: small vectors, no 2 MB pages
     let d = load(&format!("{din}/requests.log"));
     let nt = thread::available_parallelism().map_or(12, |n| n.get());
-    let mut bs: Vec<usize> = (0..4 * nt).map(|k| k * d.len() / (4 * nt)).collect();
+    let mut bs: Vec<usize> = (0..nt).map(|k| k * d.len() / nt).collect();
     for b in &mut bs[1..] {
         while *b > 0 && *b < d.len() && d[*b - 1] != b'\n' {
             *b += 1; // to a line start
@@ -151,10 +147,10 @@ fn main() {
     bs.push(d.len());
     let new = || (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let tab: (Vec<AtomicU64>, Vec<AtomicU64>) = (new(), new());
-    let (bs, tb, next) = (&bs, &tab, &AtomicUsize::new(0));
+    let (bs, tb) = (&bs, &tab);
     let parts: Vec<Vec<Hour>> = thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
-            .map(|_| sc.spawn(move || parse(d, next, bs, tb)))
+            .map(|t| sc.spawn(move || parse(d, bs[t], bs[t + 1], tb)))
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
