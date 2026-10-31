@@ -17,9 +17,10 @@ Rust, standard library only, one file (`src/main.rs`), statically linked.
    `head | weight << bits(n)`; at full scale that leaves 11 bits, and 99.93 % of the weights are below 2^11,
    so the others keep the field's top value and their exact weight sits in a list sorted by edge position.
 3. **Renumbering for locality.** Node ids are a random relabelling, so a search would jump all over memory.
-   Each thread runs a BFS from its own seed and claims nodes by CAS (claims, ids and counters come from
-   zeroed memory: no pass over them in one thread); the BFS orders give the new ids and the CSR is copied in
-   that order, with prefetches several rows ahead.
+   Each thread runs a BFS from its own seed and claims nodes by CAS; a thread whose BFS is done takes blocks
+   of node ids from a shared cursor and starts a BFS from every unclaimed one, so no thread waits for the
+   largest region (claims, ids and counters come from zeroed memory: no pass over them in one thread). The
+   BFS orders give the new ids and the CSR is copied in that order, with prefetches several rows ahead.
 4. **Reverse CSR** for the backward search: in-degrees counted with atomic increments in one flat pass,
    their ends as a parallel prefix sum, each edge placed at its head's end minus one. After the renumbering
    a head is near its tail, so threads rarely share a counter.
