@@ -5,11 +5,13 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::{env, fs, thread};
 
+extern "C" {
+    fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn madvise(a: *const u8, len: usize, advice: i32) -> i32;
+}
+
 fn load(path: &str) -> &'static [u8] {
     use std::os::unix::io::AsRawFd;
-    extern "C" {
-        fn mmap(a: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-    }
     let f = fs::File::open(path).unwrap();
     let n = f.metadata().unwrap().len() as usize;
     if n == 0 {
@@ -69,10 +71,11 @@ impl Labels {
         }
         &mut self.1[self.0[v / PG] as usize][v % PG]
     }
-    // Every label is unset again (the sides reset theirs): the pages go back to the pool.
+    // After a search: its pages are cleared and go back to the pool (no list of touched nodes is kept).
     fn release(&mut self) {
         for i in self.3.drain(..) {
-            self.2.push(std::mem::replace(&mut self.0[i as usize], NO));
+            let p = std::mem::replace(&mut self.0[i as usize], NO);
+            (self.1[p as usize].fill([NO; 2]), self.2.push(p));
         }
     }
 }
@@ -96,24 +99,23 @@ impl G {
     }
 }
 
-// One half of a bidirectional Dijkstra search: .0 = 0 forward, 1 backward, .1 the touched nodes, .2 a heap
-// of dist << 32 | node. Both halves' u32 labels share one pair per node, so the meeting check at a settled
-// node reads the cache line its own label is in.
-struct Side(usize, Vec<u32>, BinaryHeap<Reverse<u64>>);
+// One half of a bidirectional Dijkstra search: .0 = 0 forward, 1 backward, .1 a heap of dist << 32 | node.
+// Both halves' u32 labels share one pair per node, so the meeting check at a settled node reads the cache
+// line its own label is in.
+struct Side(usize, BinaryHeap<Reverse<u64>>);
 
 impl Side {
     fn top(&self) -> u64 {
-        self.2.peek().map_or(u64::MAX, |r| r.0 >> 32)
+        self.1.peek().map_or(u64::MAX, |r| r.0 >> 32)
     }
     fn start(&mut self, d: &mut Labels, s: usize) {
-        d.at(s)[self.0] = 0;
-        (self.1.push(s as u32), self.2.push(Reverse(s as u64)));
+        (d.at(s)[self.0] = 0, self.1.push(Reverse(s as u64)));
     }
     // Settles the nearest node; `best` takes its sum with the other half's label (checking at settle time
     // is enough for the stop rule top + top >= best). False if a sum does not fit in u32 (the weights near
     // 2^32 on the special nodes): the query then goes to `wide`.
     fn step(&mut self, g: &G, d: &mut Labels, best: &mut u64) -> bool {
-        let Reverse(e) = self.2.pop().unwrap();
+        let Reverse(e) = self.1.pop().unwrap();
         let (du, u, k) = (e >> 32, e as u32 as usize, self.0);
         let lu = d.get(u);
         if du > lu[k] as u64 {
@@ -129,19 +131,10 @@ impl Side {
             }
             let l = d.at(v); // a missing page means an unset label, which nd improves anyway
             if nd < l[k] as u64 {
-                if l[k] == NO {
-                    self.1.push(v as u32);
-                }
-                (l[k] = nd as u32, self.2.push(Reverse(nd << 32 | v as u64)));
+                (l[k] = nd as u32, self.1.push(Reverse(nd << 32 | v as u64)));
             }
         }
         true
-    }
-    fn reset(&mut self, d: &mut Labels) {
-        for &v in &self.1 {
-            d.at(v as usize)[self.0] = NO;
-        }
-        (self.1.clear(), self.2.clear());
     }
 }
 
@@ -275,6 +268,9 @@ fn main() {
                 false => big.push((u as u32, v as u32, w as u32)),
             }
         }
+        // MADV_DONTNEED on the whole pages of this part of the file: unmapped here in parallel, not at the exit
+        let (a, e) = (bs[t].next_multiple_of(4096).min(e), e / 4096 * 4096);
+        unsafe { madvise(d.as_ptr().add(a.min(e)), e - a.min(e), 4) };
         (l, big)
     });
     let g0 = csr(n, &parts, vb);
@@ -414,7 +410,7 @@ fn main() {
     let next = AtomicUsize::new(0);
     par(nt, |_| {
         let mut d = Labels(vec![NO; n.div_ceil(PG)], vec![], vec![], vec![]);
-        let side = |k| Side(k, vec![], BinaryHeap::new());
+        let side = |k| Side(k, BinaryHeap::new());
         let (mut f, mut b) = (side(0), side(1));
         while let Some(&i) = qo.get(next.fetch_add(1, Relaxed)) {
             let ((s, t), mut best) = (qs[i], u64::MAX); // MAX: unreachable
@@ -436,7 +432,7 @@ fn main() {
                         break;
                     }
                 }
-                (f.reset(&mut d), b.reset(&mut d), d.release());
+                (f.1.clear(), b.1.clear(), d.release());
             }
             ans[i].store(best, Relaxed);
         }
